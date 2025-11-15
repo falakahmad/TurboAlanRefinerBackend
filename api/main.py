@@ -2750,21 +2750,52 @@ async def list_drive_folders():
 async def authenticate_drive():
     """Check Drive authentication status"""
     try:
+        # Check if credentials are available
+        google_creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
+        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        service_account_file = os.path.join(backend_dir, 'config', 'google_credentials.json')
+        credentials_file = os.path.join(backend_dir, 'config', 'credentials.json')
+        
+        has_env_creds = bool(google_creds_json)
+        has_file_creds = os.path.exists(service_account_file) or os.path.exists(credentials_file)
+        
         creds = get_google_credentials()
-        if creds and creds.valid:
-            return {
-                "authenticated": True,
-                "message": "Google Drive is authenticated and ready"
-            }
+        if creds:
+            # Try to refresh to validate
+            try:
+                if not creds.valid:
+                    if creds.expired and hasattr(creds, 'refresh'):
+                        from google.auth.transport.requests import Request
+                        creds.refresh(Request())
+                return {
+                    "authenticated": True,
+                    "message": "Google Drive is authenticated and ready",
+                    "has_env_creds": has_env_creds,
+                    "has_file_creds": has_file_creds,
+                    "client_email": getattr(creds, 'service_account_email', None) or getattr(creds, 'client_email', None)
+                }
+            except Exception as refresh_error:
+                return {
+                    "authenticated": False,
+                    "message": f"Credentials found but validation failed: {str(refresh_error)}",
+                    "has_env_creds": has_env_creds,
+                    "has_file_creds": has_file_creds,
+                    "error": str(refresh_error)
+                }
         else:
             return {
                 "authenticated": False,
-                "message": "Google Drive authentication required. Please run desktop app to authenticate."
+                "message": "Google Drive authentication required. Please set GOOGLE_CREDENTIALS_JSON environment variable or configure credential files.",
+                "has_env_creds": has_env_creds,
+                "has_file_creds": has_file_creds
             }
     except Exception as e:
+        import traceback
         return {
             "authenticated": False,
-            "message": f"Authentication check failed: {str(e)}"
+            "message": f"Authentication check failed: {str(e)}",
+            "error": str(e),
+            "traceback": traceback.format_exc() if os.getenv('DEBUG') == 'true' else None
         }
 
 # =============================================================================
