@@ -688,6 +688,50 @@ def download_drive_file(link_or_id: str, dest_path: str) -> str:
 OAUTH_SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/documents']
 
 def get_google_credentials(credentials_path: str = None, token_path: str = None) -> Credentials:
+    # Check for service account credentials from environment variable first (for Vercel/serverless)
+    # This allows credentials to be provided as a JSON string in environment variables
+    google_creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
+    if google_creds_json:
+        try:
+            import json as json_module
+            # Parse JSON - handle escaped newlines in private key
+            creds_data = json_module.loads(google_creds_json)
+            
+            # Fix private key if it has escaped newlines (common when pasting JSON into env vars)
+            if 'private_key' in creds_data:
+                private_key = creds_data['private_key']
+                # Replace \\n with actual newlines
+                if '\\n' in private_key:
+                    creds_data['private_key'] = private_key.replace('\\n', '\n')
+            
+            # Write to temp file for service account authentication
+            is_vercel = os.getenv('VERCEL') == '1' or os.getenv('VERCEL_ENV') is not None
+            if is_vercel:
+                temp_dir = Path('/tmp/config')
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                temp_file = temp_dir / 'google_credentials.json'
+            else:
+                # Use tempfile for local development
+                temp_file_obj = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+                temp_file = Path(temp_file_obj.name)
+                temp_file_obj.close()
+            
+            # Write credentials to temp file
+            with open(temp_file, 'w') as f:
+                json_module.dump(creds_data, f)
+            
+            # Load credentials from temp file
+            creds = service_account.Credentials.from_service_account_file(
+                str(temp_file),
+                scopes=OAUTH_SCOPES
+            )
+            return creds
+        except Exception as e:
+            import traceback
+            print(f"Warning: Failed to load Google credentials from GOOGLE_CREDENTIALS_JSON env var: {e}")
+            print(traceback.format_exc())
+            # Continue to try file-based credentials
+    
     # Check for service account file first
     # Prefer explicit env var; default to backend/config/google_credentials.json
     backend_dir = os.path.dirname(os.path.dirname(__file__))
