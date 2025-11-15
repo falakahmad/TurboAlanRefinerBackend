@@ -705,19 +705,20 @@ def get_google_credentials(credentials_path: str = None, token_path: str = None)
             # Fix private key if it has escaped newlines (common when pasting JSON into env vars)
             if 'private_key' in creds_data:
                 private_key = creds_data['private_key']
-                # Handle multiple escape scenarios
-                # Replace \\n with actual newlines (double-escaped)
+                # Handle multiple escape scenarios - replace all variations
+                # Replace \\n (double-escaped) with actual newlines
+                while '\\n' in private_key:
+                    private_key = private_key.replace('\\n', '\n')
+                # Also handle literal \n strings
                 if '\\n' in private_key:
                     private_key = private_key.replace('\\n', '\n')
-                # Also handle single escaped newlines
-                if '\\n' in private_key:
-                    private_key = private_key.replace('\\n', '\n')
-                # Ensure proper format
+                # Ensure proper format - find BEGIN marker if it's not at the start
                 if not private_key.startswith('-----BEGIN'):
-                    # Try to find the actual start
                     begin_idx = private_key.find('-----BEGIN')
                     if begin_idx > 0:
                         private_key = private_key[begin_idx:]
+                    elif begin_idx == -1:
+                        raise ValueError("Private key does not contain '-----BEGIN PRIVATE KEY-----' marker")
                 creds_data['private_key'] = private_key
             
             # Validate private key format
