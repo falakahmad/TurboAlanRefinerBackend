@@ -2499,17 +2499,34 @@ async def list_drive_files(request: DriveFileRequest = Depends()):
         credentials_file = os.path.join(backend_dir, 'config', 'credentials.json')
         token_file = os.path.join(backend_dir, 'config', 'token.json')
         
-        if not os.path.exists(service_account_file) and not os.path.exists(credentials_file):
+        # Check for credentials via environment variable or file
+        google_creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
+        has_env_creds = bool(google_creds_json)
+        has_file_creds = os.path.exists(service_account_file) or os.path.exists(credentials_file)
+        
+        if not has_env_creds and not has_file_creds:
             raise HTTPException(
                 status_code=500,
-                detail="Google Drive credentials not configured. Please set up Google Drive authentication. See backend/config/ for credential files."
+                detail="Google Drive credentials not configured. Please set GOOGLE_CREDENTIALS_JSON environment variable or set up credential files in backend/config/. See backend/config/ for credential files."
             )
         
-        creds = get_google_credentials()
-        if not creds:
+        try:
+            creds = get_google_credentials()
+            if not creds:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Google Drive not authenticated. Please check your credentials configuration."
+                )
+        except Exception as e:
+            error_detail = str(e)
+            if "Invalid JWT Signature" in error_detail or "invalid_grant" in error_detail:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Invalid Google Drive credentials: {error_detail}. Please verify your GOOGLE_CREDENTIALS_JSON environment variable has correct private_key with proper newlines."
+                )
             raise HTTPException(
                 status_code=500,
-                detail="Google Drive not authenticated. Please authenticate your Google account."
+                detail=f"Failed to load Google Drive credentials: {error_detail}"
             )
         
         service = get_drive_service_oauth()

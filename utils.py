@@ -696,12 +696,33 @@ def get_google_credentials(credentials_path: str = None, token_path: str = None)
             # Parse JSON - handle escaped newlines in private key
             creds_data = _json.loads(google_creds_json)
             
+            # Validate required fields
+            required_fields = ['type', 'project_id', 'private_key', 'client_email']
+            missing_fields = [f for f in required_fields if f not in creds_data]
+            if missing_fields:
+                raise ValueError(f"Missing required fields in credentials: {missing_fields}")
+            
             # Fix private key if it has escaped newlines (common when pasting JSON into env vars)
             if 'private_key' in creds_data:
                 private_key = creds_data['private_key']
-                # Replace \\n with actual newlines
+                # Handle multiple escape scenarios
+                # Replace \\n with actual newlines (double-escaped)
                 if '\\n' in private_key:
-                    creds_data['private_key'] = private_key.replace('\\n', '\n')
+                    private_key = private_key.replace('\\n', '\n')
+                # Also handle single escaped newlines
+                if '\\n' in private_key:
+                    private_key = private_key.replace('\\n', '\n')
+                # Ensure proper format
+                if not private_key.startswith('-----BEGIN'):
+                    # Try to find the actual start
+                    begin_idx = private_key.find('-----BEGIN')
+                    if begin_idx > 0:
+                        private_key = private_key[begin_idx:]
+                creds_data['private_key'] = private_key
+            
+            # Validate private key format
+            if not creds_data['private_key'].startswith('-----BEGIN PRIVATE KEY-----'):
+                raise ValueError("Invalid private key format: must start with '-----BEGIN PRIVATE KEY-----'")
             
             # Write to temp file for service account authentication
             is_vercel = os.getenv('VERCEL') == '1' or os.getenv('VERCEL_ENV') is not None
@@ -717,17 +738,27 @@ def get_google_credentials(credentials_path: str = None, token_path: str = None)
             
             # Write credentials to temp file
             with open(temp_file, 'w') as f:
-                _json.dump(creds_data, f)
+                _json.dump(creds_data, f, indent=2)
+            
+            # Verify the file was written correctly
+            if not temp_file.exists():
+                raise IOError(f"Failed to write credentials file to {temp_file}")
             
             # Load credentials from temp file
             creds = service_account.Credentials.from_service_account_file(
                 str(temp_file),
                 scopes=OAUTH_SCOPES
             )
+            
+            # Verify credentials are valid
+            if not creds:
+                raise ValueError("Failed to create credentials object")
+            
             return creds
         except Exception as e:
             import traceback
-            print(f"Warning: Failed to load Google credentials from GOOGLE_CREDENTIALS_JSON env var: {e}")
+            error_msg = f"Failed to load Google credentials from GOOGLE_CREDENTIALS_JSON env var: {e}"
+            print(f"Warning: {error_msg}")
             print(traceback.format_exc())
             # Continue to try file-based credentials
     
