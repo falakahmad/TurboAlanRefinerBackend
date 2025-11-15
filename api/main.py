@@ -1206,9 +1206,12 @@ async def health_fast() -> Dict[str, Any]:
 @app.get("/jobs/{job_id}/status")
 async def job_status(job_id: str) -> Dict[str, Any]:
     """Return the latest progress snapshot for a jobId (polling fallback with DB)."""
+    from core.database import asdict
     row = get_job(job_id)
     if row:
-        return {"jobId": job_id, **row}
+        # Convert RefinementJob dataclass to dict
+        job_dict = asdict(row)
+        return {"jobId": job_id, **job_dict}
     snap = jobs_snapshot.get(job_id)
     return snap or {"jobId": job_id, "status": "unknown"}
 

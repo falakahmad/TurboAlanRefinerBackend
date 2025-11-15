@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Protocol, Optional, TYPE_CHECKING
 
 from logger import get_logger, log_exception
@@ -58,9 +59,23 @@ class LocalSink:
             logger.debug(f"Generated unique filename: {os.path.basename(dest)}")
 
         # Perform atomic move into destination directory
+        # Use copy + delete instead of os.replace to handle cross-device links
+        # (e.g., when moving from /tmp to /var/task on Vercel)
         try:
-            os.replace(local_tmp_path, dest)
-            return dest
+            # Try atomic move first (fastest, works on same filesystem)
+            try:
+                os.replace(local_tmp_path, dest)
+                return dest
+            except OSError as e:
+                # If cross-device link error (errno 18), fall back to copy + delete
+                if e.errno == 18:  # Invalid cross-device link
+                    logger.debug(f"Cross-device link detected, using copy+delete: {local_tmp_path} -> {dest}")
+                    shutil.copy2(local_tmp_path, dest)
+                    os.remove(local_tmp_path)
+                    return dest
+                else:
+                    # Re-raise other OSErrors
+                    raise
         except Exception as e:
             log_exception("LOCAL_SINK_WRITE", e)
             raise
