@@ -750,12 +750,18 @@ class RefinementRequest(BaseModel):
             if self.output_settings.get("type") not in ("local", "drive"):
                 self.output_settings["type"] = "local"
             if self.output_settings.get("type") == "local":
-                path = self.output_settings.get("path") or self.output_settings.get("dir")
-                if not isinstance(path, str):
-                    path = str(get_output_dir())
-                # Sanitize path to ensure it's within backend directory
-                sanitized_path = sanitize_path(path, base_dir=get_backend_root())
-                self.output_settings["path"] = str(sanitized_path)
+                # On Vercel, always use /tmp/output (writable)
+                # Otherwise, use provided path or default, with sanitization
+                from core.paths import _is_vercel
+                if _is_vercel():
+                    self.output_settings["path"] = str(get_output_dir())
+                else:
+                    path = self.output_settings.get("path") or self.output_settings.get("dir")
+                    if not isinstance(path, str):
+                        path = str(get_output_dir())
+                    # Sanitize path to ensure it's within backend directory
+                    sanitized_path = sanitize_path(path, base_dir=get_backend_root())
+                    self.output_settings["path"] = str(sanitized_path)
         except Exception:
             # Never fail constructor; rely on endpoint logic to handle deeper errors
             pass
@@ -1920,12 +1926,20 @@ async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenera
                 
                 output_sink = None
                 if request.output_settings.get("type") == "local":
-                    # Use centralized path configuration with sanitization
-                    output_path_env = request.output_settings.get("path")
-                    output_path = sanitize_path(
-                        output_path_env if output_path_env else "",
-                        base_dir=get_backend_root()
-                    )
+                    # On Vercel, always use /tmp/output (writable)
+                    # Otherwise, use provided path or default, with sanitization
+                    from core.paths import _is_vercel
+                    if _is_vercel():
+                        output_path = get_output_dir()
+                    else:
+                        output_path_env = request.output_settings.get("path")
+                        if output_path_env:
+                            output_path = sanitize_path(
+                                output_path_env,
+                                base_dir=get_backend_root()
+                            )
+                        else:
+                            output_path = get_output_dir()
                     output_sink = LocalSink(str(output_path))
                 elif request.output_settings.get("type") == "drive":
                     try:
