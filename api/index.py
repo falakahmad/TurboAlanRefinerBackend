@@ -2,6 +2,7 @@
 Vercel serverless function entry point for FastAPI application.
 
 This file serves as the main entry point for Vercel's serverless function.
+Vercel automatically detects Python files in the api/ directory.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ sys.path.insert(0, str(backend_root))
 # Import FastAPI app
 from api.main import app
 
-# Export handler for Vercel
+# Vercel expects the handler to be exported
+# For FastAPI, we export the app directly
 handler = app
 
