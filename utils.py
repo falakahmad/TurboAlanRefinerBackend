@@ -737,25 +737,44 @@ def get_google_credentials(credentials_path: str = None, token_path: str = None)
                 temp_file = Path(temp_file_obj.name)
                 temp_file_obj.close()
             
-            # Write credentials to temp file
-            with open(temp_file, 'w') as f:
-                _json.dump(creds_data, f, indent=2)
-            
-            # Verify the file was written correctly
-            if not temp_file.exists():
-                raise IOError(f"Failed to write credentials file to {temp_file}")
-            
-            # Load credentials from temp file
-            creds = service_account.Credentials.from_service_account_file(
-                str(temp_file),
-                scopes=OAUTH_SCOPES
-            )
-            
-            # Verify credentials are valid
-            if not creds:
-                raise ValueError("Failed to create credentials object")
-            
-            return creds
+            # Use from_service_account_info instead of file (more reliable)
+            # This avoids file I/O issues and is the recommended approach when you have the JSON data
+            try:
+                creds = service_account.Credentials.from_service_account_info(
+                    creds_data,
+                    scopes=OAUTH_SCOPES
+                )
+                
+                # Verify credentials are valid
+                if not creds:
+                    raise ValueError("Failed to create credentials object")
+                
+                return creds
+            except Exception as e:
+                # Fallback: try writing to file if from_service_account_info fails
+                import traceback
+                print(f"Warning: from_service_account_info failed, trying file method: {e}")
+                print(traceback.format_exc())
+                
+                # Write credentials to temp file as fallback
+                is_vercel = os.getenv('VERCEL') == '1' or os.getenv('VERCEL_ENV') is not None
+                if is_vercel:
+                    temp_dir = Path('/tmp/config')
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    temp_file = temp_dir / 'google_credentials.json'
+                else:
+                    temp_file_obj = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+                    temp_file = Path(temp_file_obj.name)
+                    temp_file_obj.close()
+                
+                with open(temp_file, 'w') as f:
+                    _json.dump(creds_data, f, indent=2)
+                
+                creds = service_account.Credentials.from_service_account_file(
+                    str(temp_file),
+                    scopes=OAUTH_SCOPES
+                )
+                return creds
         except Exception as e:
             import traceback
             error_msg = f"Failed to load Google credentials from GOOGLE_CREDENTIALS_JSON env var: {e}"
