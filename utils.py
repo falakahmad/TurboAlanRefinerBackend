@@ -688,35 +688,6 @@ def download_drive_file(link_or_id: str, dest_path: str) -> str:
 OAUTH_SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/documents']
 
 def get_google_credentials(credentials_path: str = None, token_path: str = None) -> Credentials:
-    # Check for service account credentials from environment variable first (for Vercel/serverless)
-    google_creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
-    if google_creds_json:
-        try:
-            import tempfile
-            # Parse JSON and write to temp file
-            creds_data = json.loads(google_creds_json)
-            is_vercel = os.getenv('VERCEL') == '1' or os.getenv('VERCEL_ENV') is not None
-            if is_vercel:
-                temp_dir = Path('/tmp/config')
-                temp_dir.mkdir(parents=True, exist_ok=True)
-                temp_file = temp_dir / 'google_credentials.json'
-            else:
-                temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
-                temp_file_path = Path(temp_file.name)
-                temp_file.close()
-                temp_file = temp_file_path
-            
-            with open(temp_file, 'w') as f:
-                json.dump(creds_data, f)
-            
-            creds = service_account.Credentials.from_service_account_file(
-                str(temp_file),
-                scopes=OAUTH_SCOPES
-            )
-            return creds
-        except Exception as e:
-            print(f"Warning: Failed to load Google credentials from env var: {e}")
-    
     # Check for service account file first
     # Prefer explicit env var; default to backend/config/google_credentials.json
     backend_dir = os.path.dirname(os.path.dirname(__file__))
