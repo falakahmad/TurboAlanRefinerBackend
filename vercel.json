@@ -1,25 +1,16 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/main.py",
-      "use": "@vercel/python"
+  "functions": {
+    "api/main.py": {
+      "runtime": "python3.11",
+      "maxDuration": 300,
+      "memory": 1024
     }
-  ],
+  },
   "routes": [
     {
       "src": "/(.*)",
       "dest": "api/main.py"
     }
-  ],
-  "env": {
-    "PYTHON_VERSION": "3.11"
-  },
-  "functions": {
-    "api/main.py": {
-      "maxDuration": 300,
-      "memory": 1024
-    }
-  }
+  ]
 }
-
