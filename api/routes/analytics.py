@@ -158,3 +158,4 @@ async def test_analytics() -> JSONResponse:
             details={"error": str(e)}
         )
 
+

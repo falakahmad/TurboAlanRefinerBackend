@@ -247,9 +247,12 @@ def _check_google_drive_connection() -> bool:
             except (_json.JSONDecodeError, KeyError):
                 return False
         
-        # No fallback - credentials must come from environment variables
+        # Fallback: Check if default file exists (for backward compatibility)
         else:
-            return False
+            backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            default_creds = os.path.join(backend_dir, 'config', 'google_credentials.json')
+            if not os.path.exists(default_creds):
+                return False
         
         # Try to get credentials and validate
         creds = get_google_credentials()
@@ -2528,13 +2531,34 @@ class DriveUploadRequest(BaseModel):
 async def list_drive_files(request: DriveFileRequest = Depends()):
     """List files from Google Drive folder"""
     try:
-        # Get credentials from environment variables only
-        creds = get_google_credentials()
-        if not creds:
+        # Check if credentials exist
+        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        service_account_file = os.path.join(backend_dir, 'config', 'google_credentials.json')
+        credentials_file = os.path.join(backend_dir, 'config', 'credentials.json')
+        token_file = os.path.join(backend_dir, 'config', 'token.json')
+        
+        if not os.path.exists(service_account_file) and not os.path.exists(credentials_file):
             raise HTTPException(
                 status_code=500,
-                detail="Google Drive credentials not configured. Please set GOOGLE_SERVICE_ACCOUNT_JSON in your environment variables. See backend/env.example for setup instructions."
+                detail="Google Drive credentials not configured. Please set up Google Drive authentication. See backend/config/ for credential files."
             )
+        
+        creds = get_google_credentials()
+        if not creds:
+            # Check if credentials file exists
+            backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            creds_file = os.path.join(backend_dir, 'config', 'google_credentials.json')
+            
+            if os.path.exists(creds_file):
+                raise HTTPException(
+                    status_code=500,
+                    detail="Google Drive credentials file exists but is invalid. The service account key may have been regenerated. Please regenerate the key in Google Cloud Console and replace config/google_credentials.json. See backend/FIX_INVALID_JWT_SIGNATURE.md for instructions."
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Google Drive credentials not configured. Please set up Google Drive authentication. See backend/config/ for credential files or backend/FIX_INVALID_JWT_SIGNATURE.md for setup instructions."
+                )
         
         service = get_drive_service_oauth()
         if not service:

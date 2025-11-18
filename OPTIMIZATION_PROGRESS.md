@@ -157,3 +157,4 @@ app.include_router(example_router)
 - Environment validation is non-blocking in development for easier local testing
 - All changes maintain backward compatibility
 
+

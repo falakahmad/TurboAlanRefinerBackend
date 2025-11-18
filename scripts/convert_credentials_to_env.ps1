@@ -29,3 +29,4 @@ Write-Host "Or set it in PowerShell:" -ForegroundColor Green
 Write-Host '$env:GOOGLE_SERVICE_ACCOUNT_JSON = "' + $jsonContent + '"' -ForegroundColor Yellow
 Write-Host ""
 
+

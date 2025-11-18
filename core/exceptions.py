@@ -159,3 +159,4 @@ class RateLimitError(RefinerException):
             details={"retry_after": retry_after, **(details or {})}
         )
 
+

@@ -30,7 +30,7 @@ class FileVersionManager:
         self.storage_dir = Path(storage_dir)
         # Only try to create directory if not on read-only filesystem
         try:
-            self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             # If we can't create it, continue anyway (might be read-only)
             pass

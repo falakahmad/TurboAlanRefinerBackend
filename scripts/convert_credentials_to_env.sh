@@ -32,3 +32,4 @@ echo "Or export it directly:"
 echo "export GOOGLE_SERVICE_ACCOUNT_JSON='$CREDENTIALS'"
 echo ""
 
+

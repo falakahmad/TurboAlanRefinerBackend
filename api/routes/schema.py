@@ -52,3 +52,4 @@ async def get_schema_info() -> JSONResponse:
     }
     return JSONResponse(schema_info)
 
+
