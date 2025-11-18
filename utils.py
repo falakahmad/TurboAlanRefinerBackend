@@ -836,7 +836,7 @@ def create_google_doc(title: str, content: str = "") -> str:
                 }]}
             ).execute()
         
-    return doc_id
+        return doc_id
     except Exception as e:
         raise ValueError(f"Failed to create Google Doc: {e}")
 
