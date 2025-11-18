@@ -245,6 +245,7 @@ def map_headings_to_refined_doc(source_doc_path: str, refined_doc_path: str, out
             continue
 
         # Check if this paragraph matches a mapped heading
+        matched = False
         for level, heading_text in heading_map.items():
             if text.lower() == heading_text.lower() or text.lower().startswith(heading_text.lower()):
                 # Apply heading style
@@ -252,9 +253,11 @@ def map_headings_to_refined_doc(source_doc_path: str, refined_doc_path: str, out
                 style = _get_style_by_name(refined_doc, style_name)
                 if style:
                     para.style = style
+                matched = True
                 break
-                else:
-            # Check for markdown headings
+        
+        # Check for markdown headings if no mapped heading matched
+        if not matched:
             if text.startswith("#"):
                 level = len(text) - len(text.lstrip("#"))
                 style_name = f"Heading {min(level, 6)}"
