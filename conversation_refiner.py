@@ -83,27 +83,212 @@ class ConversationalRefiner:
             3: "(aggressive)",
         }.get(int(level), "(custom)")
 
+    def _normalize_schema_name(self, name: str) -> str | None:
+        """Convert human-readable schema names to schema IDs."""
+        name_lower = name.strip().lower().replace(' ', '_').replace('-', '_')
+        
+        # Direct match
+        if name_lower in ADVANCED_COMMANDS:
+            return name_lower
+        
+        # Mapping of common variations
+        schema_map = {
+            'microstructure': 'microstructure_control',
+            'microstructure control': 'microstructure_control',
+            'micro structure': 'microstructure_control',
+            'macrostructure': 'macrostructure_analysis',
+            'macrostructure analysis': 'macrostructure_analysis',
+            'macro structure': 'macrostructure_analysis',
+            'anti scanner': 'anti_scanner_techniques',
+            'anti-scanner': 'anti_scanner_techniques',
+            'scanner techniques': 'anti_scanner_techniques',
+            'detection reduction': 'anti_scanner_techniques',
+            'entropy': 'entropy_management',
+            'entropy management': 'entropy_management',
+            'randomness': 'entropy_management',
+            'tone tuning': 'semantic_tone_tuning',
+            'semantic tone': 'semantic_tone_tuning',
+            'writing style': 'semantic_tone_tuning',
+            'voice': 'semantic_tone_tuning',
+            'formatting': 'formatting_safeguards',
+            'formatting safeguards': 'formatting_safeguards',
+            'preserve formatting': 'formatting_safeguards',
+            'refiner': 'refiner_control',
+            'refiner control': 'refiner_control',
+            'refinement intensity': 'refiner_control',
+            'history': 'history_analysis',
+            'history analysis': 'history_analysis',
+            'learn from past': 'history_analysis',
+            'annotation': 'annotation_mode',
+            'annotation mode': 'annotation_mode',
+            'explanatory notes': 'annotation_mode',
+            'humanize': 'humanize_academic',
+            'humanize academic': 'humanize_academic',
+            'academic humanization': 'humanize_academic',
+        }
+        
+        # Check variations
+        for key, schema_id in schema_map.items():
+            if key in name_lower or name_lower in key:
+                return schema_id
+        
+        # Partial match on schema IDs
+        for schema_id in ADVANCED_COMMANDS.keys():
+            if name_lower in schema_id or schema_id.replace('_', ' ') in name_lower:
+                return schema_id
+        
+        return None
+
     def describe_schema(self, schema_id: str, level: int | None = None) -> str:
+        # Try to normalize the schema name first
+        normalized_id = self._normalize_schema_name(schema_id)
+        if normalized_id:
+            schema_id = normalized_id
+        
         sid = str(schema_id or '').strip().lower()
         entry = ADVANCED_COMMANDS.get(sid)
         if not entry:
-            return f"Unknown schema: {schema_id}"
+            return f"Unknown schema: {schema_id}. Available schemas: {', '.join(ADVANCED_COMMANDS.keys())}"
+        
         desc = entry.get('description') if isinstance(entry, dict) else str(entry)
+        category = entry.get('category', 'general') if isinstance(entry, dict) else 'general'
         level_note = self._level_label(level)
-        tips = {
-            'microstructure_control': "Targets sentence length, passive voice, hedges, and cliché removal.",
-            'macrostructure_analysis': "Looks for missing intro/conclusion, section headings, and redundant paragraphs.",
-            'semantic_tone_tuning': "Tunes formality/friendliness/executive tone while preserving domain terms.",
-            'anti_scanner_techniques': "Applies controlled variation (jitter), caps rare substitutions, removes overused scaffolds.",
-            'entropy_management': "Shapes temperature/penalties to avoid repetitive n-grams and generic transitions.",
-            'formatting_safeguards': "Protects headings/lists/code blocks and restores after refinement.",
-            'refiner_control': "Governs pass aggressiveness and structure-change allowances.",
-            'history_analysis': "Derives session profile from past passes to nudge strategy.",
-            'annotation_mode': "Adds inline or sidecar notes explaining changes and rationale.",
-            'humanize_academic': "Light humanization for academic tone with optional passive/synonym tweaks.",
-        }.get(sid, '')
-        more = f"\nHint: {tips}" if tips else ''
-        return f"• `{sid}` {level_note} — {desc}{more}"
+        
+        # User-friendly schema name
+        friendly_name = sid.replace('_', ' ').title()
+        
+        # Detailed explanations for each schema
+        detailed_info = {
+            'microstructure_control': {
+                'what': 'Fine-grained sentence and phrase adjustments',
+                'how': 'Adjusts sentence structure, clause patterns, sentence length variation, and removes repetitive phrasing at the sentence level.',
+                'when': 'Use for improving sentence-level flow, reducing repetition, and creating more natural sentence variety.',
+                'levels': {
+                    0: 'Off - No microstructure adjustments',
+                    1: 'Low - Minimal sentence-level changes',
+                    2: 'Medium - Moderate sentence restructuring and variety',
+                    3: 'High - Aggressive sentence-level optimization'
+                }
+            },
+            'macrostructure_analysis': {
+                'what': 'Document-level organization and flow',
+                'how': 'Analyzes paragraph structure, section organization, introduction/conclusion quality, and overall document coherence.',
+                'when': 'Use for improving document structure, ensuring logical flow, and organizing content at the paragraph/section level.',
+                'levels': {
+                    0: 'Off - No macro-level analysis',
+                    1: 'Low - Basic paragraph and section checks',
+                    2: 'Medium - Moderate structural improvements',
+                    3: 'High - Comprehensive document restructuring'
+                }
+            },
+            'anti_scanner_techniques': {
+                'what': 'Methods to reduce AI detection flags',
+                'how': 'Introduces controlled imperfection, punctuation variation, rare word substitutions, and removes AI-like patterns.',
+                'when': 'Use when you need to reduce the likelihood of AI detection while maintaining content quality.',
+                'levels': {
+                    0: 'Off - No anti-detection measures',
+                    1: 'Low - Minimal variation and imperfection',
+                    2: 'Medium - Moderate anti-detection techniques',
+                    3: 'High - Aggressive anti-detection measures'
+                }
+            },
+            'entropy_management': {
+                'what': 'Randomness and unpredictability control',
+                'how': 'Controls token predictability, introduces natural variation, and avoids repetitive n-grams and patterns.',
+                'when': 'Use to make text less predictable and more natural-sounding by managing randomness and variation.',
+                'levels': {
+                    0: 'Off - No entropy management',
+                    1: 'Low - Minimal randomness control',
+                    2: 'Medium - Moderate unpredictability',
+                    3: 'High - Maximum variation and randomness'
+                }
+            },
+            'semantic_tone_tuning': {
+                'what': 'Adjust writing style and voice',
+                'how': 'Modifies tone, formality level, and semantic nuance while preserving the core meaning and domain-specific terms.',
+                'when': 'Use to adjust the tone (formal/casual), voice, or style of your writing to match your target audience.',
+                'levels': {
+                    0: 'Off - No tone adjustments',
+                    1: 'Low - Subtle tone modifications',
+                    2: 'Medium - Moderate style adjustments',
+                    3: 'High - Significant tone and voice changes'
+                }
+            },
+            'formatting_safeguards': {
+                'what': 'Preserve document structure and formatting',
+                'how': 'Protects headings, lists, code blocks, paragraph spacing, and other formatting elements during refinement.',
+                'when': 'Essential when working with formatted documents (Word, Markdown) where structure must be preserved.',
+                'levels': {
+                    0: 'Off - No formatting protection',
+                    1: 'Low - Basic formatting preservation',
+                    2: 'Medium - Moderate formatting safeguards',
+                    3: 'High - Strict formatting preservation'
+                }
+            },
+            'refiner_control': {
+                'what': 'Overall refinement intensity',
+                'how': 'Controls the aggressiveness and scope of refinement passes, managing how much the text can be changed.',
+                'when': 'Use to set the overall intensity of refinement - lower for conservative changes, higher for more significant improvements.',
+                'levels': {
+                    0: 'Off - Minimal refinement',
+                    1: 'Low - Conservative refinement',
+                    2: 'Medium - Balanced refinement',
+                    3: 'High - Aggressive refinement'
+                }
+            },
+            'history_analysis': {
+                'what': 'Learn from previous refinement passes',
+                'how': 'Analyzes past refinement runs to identify patterns, optimize future passes, and learn from historical data.',
+                'when': 'Use when doing multiple refinement passes to improve consistency and learn from previous iterations.',
+                'levels': {
+                    0: 'Off - No history analysis',
+                    1: 'Low - Basic pattern recognition',
+                    2: 'Medium - Moderate learning from history',
+                    3: 'High - Comprehensive historical analysis'
+                }
+            },
+            'annotation_mode': {
+                'what': 'Add explanatory notes and comments',
+                'how': 'Provides inline or sidecar annotations explaining changes, rationale, and highlighting important modifications.',
+                'when': 'Use when you want to understand what changes were made and why, especially for educational or review purposes.',
+                'levels': {
+                    0: 'Off - No annotations',
+                    1: 'Low - Minimal explanatory notes',
+                    2: 'Medium - Moderate annotation detail',
+                    3: 'High - Comprehensive change explanations'
+                }
+            },
+            'humanize_academic': {
+                'what': 'Make academic writing more natural',
+                'how': 'Applies light humanization with academic transitions, optional synonym substitutions, and passive voice adjustments.',
+                'when': 'Use for academic papers and research documents to make them sound more natural while maintaining academic rigor.',
+                'levels': {
+                    0: 'Off - No academic humanization',
+                    1: 'Low - Subtle naturalization',
+                    2: 'Medium - Moderate humanization',
+                    3: 'High - Significant naturalization'
+                }
+            }
+        }
+        
+        info = detailed_info.get(sid, {})
+        level_info = info.get('levels', {}).get(level or 0, '')
+        
+        response_parts = [
+            f"**{friendly_name}** {level_note if level is not None else ''}",
+            f"\n{desc}",
+        ]
+        
+        if info:
+            response_parts.append(f"\n\n**What it does:** {info.get('what', '')}")
+            response_parts.append(f"\n**How it works:** {info.get('how', '')}")
+            response_parts.append(f"\n**When to use:** {info.get('when', '')}")
+            if level_info:
+                response_parts.append(f"\n**Current level ({level or 0}):** {level_info}")
+        
+        response_parts.append(f"\n\n**Category:** {category.title()}")
+        
+        return ''.join(response_parts)
 
     def describe_all_schemas(self, schema_levels: dict | None) -> str:
         levels = {str(k): int(v) for k, v in (schema_levels or {}).items() if isinstance(v, (int, float))}
@@ -148,13 +333,26 @@ class ConversationalRefiner:
         mlow = (message or '').strip().lower()
         if self.is_schema_request(mlow):
             return self.get_advanced_strategy_insight()
-        # Explain single schema: "explain <schema>" or "explain <schema> to me"
-        if mlow.startswith('explain') or 'explain' in mlow or 'what is' in mlow:
-            # try to match any schema id within message
+        # Explain single schema: "explain <schema>", "what is <schema>", "tell me about <schema>", etc.
+        schema_query_patterns = ['explain', 'what is', 'tell me about', 'describe', 'how does', 'what does', 'information about']
+        if any(pattern in mlow for pattern in schema_query_patterns):
+            # Try to match any schema name in the message
             for sid in ADVANCED_COMMANDS.keys():
-                if sid in mlow:
+                # Check for exact schema ID
+                if sid in mlow or sid.replace('_', ' ') in mlow:
                     return self.describe_schema(sid, getattr(self, 'schema_levels', {}).get(sid))
-            if 'all' in mlow or 'current schema' in mlow or 'schemas' in mlow:
+                # Check for friendly name variations
+                friendly_name = sid.replace('_', ' ').title().lower()
+                if friendly_name in mlow:
+                    return self.describe_schema(sid, getattr(self, 'schema_levels', {}).get(sid))
+            
+            # Try normalized schema name matching
+            normalized = self._normalize_schema_name(mlow)
+            if normalized:
+                return self.describe_schema(normalized, getattr(self, 'schema_levels', {}).get(normalized))
+            
+            # If asking about "all" schemas
+            if 'all' in mlow or 'current schema' in mlow or 'schemas' in mlow or 'every schema' in mlow:
                 return self.describe_all_schemas(getattr(self, 'schema_levels', {}))
 
         if flags is None:
