@@ -25,24 +25,26 @@ class ConversationalRefiner:
 
     def is_schema_request(self, message: str) -> bool:
         m = message.strip().lower()
+        
+        # First, check for simple greetings or random text - these should NOT trigger schema
+        simple_greetings = {"hi", "hello", "hey", "hi there", "hello there", "asasas", "test", "test test"}
+        if m in simple_greetings or len(m) < 3:
+            return False
+        
         # Exact matches for schema commands
         if m in {"/schema", "schema", "/help", "help", "show schema", "list schema", "show schemas"}:
             return True
-        # Only match explicit schema-related queries, not greetings or casual messages
+        
+        # Only match explicit schema-related queries
         schema_terms = [
             "schema details", "advanced commands", "capabilities",
             "toggles", "flags", "what can you do", "show commands", "list commands",
             "what schemas", "which schemas", "available schemas", "schema options",
             "who are you", "what are you"
         ]
+        
         # Check if message contains schema terms
-        has_schema_term = any(term in m for term in schema_terms)
-        
-        # Exclude simple greetings and casual messages
-        is_simple_greeting = m in {"hi", "hello", "hey", "hi there", "hello there", "asasas"}
-        
-        # Only return schema if it's explicitly about schemas, not a greeting or random text
-        return has_schema_term and not is_simple_greeting
+        return any(term in m for term in schema_terms)
 
     def matches_strategy_request(self, message: str) -> bool:
         triggers = [
