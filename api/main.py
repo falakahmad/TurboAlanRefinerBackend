@@ -1484,6 +1484,65 @@ async def download_file(request: FileDownloadRequest):
         log_exception("FILE_DOWNLOAD_ERROR", e)
         raise HTTPException(500, f"File download failed: {str(e)}")
 
+@app.get("/files/serve")
+@handle_api_error
+async def serve_file_by_name(filename: str):
+    """
+    Serve a file from the output directory by filename.
+    This endpoint is used by the frontend to download processed files.
+    """
+    from core.paths import get_output_dir
+    
+    if not filename:
+        raise APIError("Filename is required", 400, "MISSING_FILENAME")
+    
+    # Security: Only allow alphanumeric, dots, hyphens, underscores in filename
+    # Prevent directory traversal
+    if not all(c.isalnum() or c in '.-_' for c in filename) or filename.startswith('.'):
+        raise APIError("Invalid filename", 400, "INVALID_FILENAME")
+    
+    # Get output directory
+    output_dir = get_output_dir()
+    
+    # Construct file path
+    file_path = output_dir / filename
+    
+    # Security: Ensure the resolved path is within output directory
+    try:
+        resolved_path = file_path.resolve()
+        if not str(resolved_path).startswith(str(output_dir.resolve())):
+            raise APIError("Access denied", 403, "ACCESS_DENIED")
+    except (OSError, ValueError):
+        raise APIError("Invalid file path", 400, "INVALID_PATH")
+    
+    # Check if file exists
+    if not os.path.exists(resolved_path) or not os.path.isfile(resolved_path):
+        raise APIError(f"File not found: {filename}", 404, "FILE_NOT_FOUND")
+    
+    # Determine content type
+    ext = Path(filename).suffix.lower()
+    content_type_map = {
+        '.txt': 'text/plain; charset=utf-8',
+        '.md': 'text/markdown; charset=utf-8',
+        '.json': 'application/json; charset=utf-8',
+        '.pdf': 'application/pdf',
+        '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '.doc': 'application/msword',
+    }
+    content_type = content_type_map.get(ext, 'application/octet-stream')
+    
+    # Return file as streaming response
+    return StreamingResponse(
+        open(resolved_path, 'rb'),
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+    )
+
 # Google Drive integration
 @app.post("/files/drive/upload")
 async def upload_to_drive(request: Request):
