@@ -172,3 +172,4 @@ All indexes are automatically created by the MongoDB service on initialization. 
 - Collections are created automatically when first document is inserted
 - Indexes are created automatically on service initialization
 
+

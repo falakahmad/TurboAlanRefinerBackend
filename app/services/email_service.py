@@ -57,35 +57,119 @@ class EmailService:
             msg['From'] = self.from_email
             msg['To'] = to_email
             
-            # Create HTML content
+            # Create HTML content with yellow/golden theme
             html = f"""
-            <html>
-              <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px 10px 0 0;">
-                  <h1 style="color: white; margin: 0;">Turbo Alan Refiner</h1>
-                </div>
-                <div style="background: #f7fafc; padding: 30px; border-radius: 0 0 10px 10px;">
-                  <h2 style="color: #2d3748; margin-top: 0;">Password Reset Request</h2>
-                  <p style="color: #4a5568; font-size: 16px;">
-                    You requested to reset your password. Use the following code to verify your identity:
-                  </p>
-                  <div style="background: white; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
-                    <p style="color: #718096; margin: 0; font-size: 14px;">Your verification code is:</p>
-                    <h1 style="color: #667eea; font-size: 48px; letter-spacing: 8px; margin: 10px 0;">{otp_code}</h1>
-                  </div>
-                  <p style="color: #4a5568; font-size: 14px;">
-                    This code will expire in 10 minutes. If you didn't request this, please ignore this email.
-                  </p>
-                  <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 30px 0;">
-                  <p style="color: #a0aec0; font-size: 12px; text-align: center;">
-                    Turbo Alan Refiner - AI-Powered Text Refinement
-                  </p>
-                </div>
+            <!DOCTYPE html>
+            <html lang="en">
+              <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Password Reset - Turbo Alan Refiner</title>
+              </head>
+              <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5;">
+                <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f5f5;">
+                  <tr>
+                    <td align="center" style="padding: 40px 20px;">
+                      <table role="presentation" style="max-width: 600px; width: 100%; border-collapse: collapse; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                        <!-- Header with Golden Gradient -->
+                        <tr>
+                          <td style="background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%); padding: 40px 30px; text-align: center;">
+                            <div style="display: inline-block; width: 60px; height: 60px; background-color: rgba(255, 255, 255, 0.2); border-radius: 50%; margin-bottom: 15px; display: flex; align-items: center; justify-content: center;">
+                              <span style="color: #ffffff; font-size: 28px; font-weight: bold;">T</span>
+                            </div>
+                            <h1 style="color: #ffffff; margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">Turbo Alan Refiner</h1>
+                            <p style="color: rgba(255, 255, 255, 0.9); margin: 8px 0 0 0; font-size: 14px; font-weight: 400;">AI-Powered Text Refinement</p>
+                          </td>
+                        </tr>
+                        
+                        <!-- Content Section -->
+                        <tr>
+                          <td style="padding: 40px 30px; background-color: #ffffff;">
+                            <h2 style="color: #1f2937; margin: 0 0 16px 0; font-size: 24px; font-weight: 600;">Password Reset Request</h2>
+                            <p style="color: #4b5563; font-size: 16px; line-height: 1.6; margin: 0 0 30px 0;">
+                              You requested to reset your password. Use the following verification code to proceed:
+                            </p>
+                            
+                            <!-- OTP Code Box -->
+                            <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border: 2px solid #fbbf24; border-radius: 12px; padding: 30px; text-align: center; margin: 30px 0;">
+                              <p style="color: #92400e; margin: 0 0 12px 0; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Your Verification Code</p>
+                              <div style="background-color: #ffffff; border-radius: 8px; padding: 20px; margin: 15px 0; display: inline-block; min-width: 280px;">
+                                <h1 style="color: #f59e0b; font-size: 48px; letter-spacing: 12px; margin: 0; font-weight: 700; font-family: 'Courier New', monospace;">{otp_code}</h1>
+                              </div>
+                              <p style="color: #92400e; margin: 15px 0 0 0; font-size: 12px; font-weight: 500;">
+                                ⏰ Valid for 10 minutes
+                              </p>
+                            </div>
+                            
+                            <!-- Security Notice -->
+                            <div style="background-color: #fffbeb; border-left: 4px solid #fbbf24; padding: 16px; border-radius: 6px; margin: 30px 0;">
+                              <p style="color: #78350f; font-size: 14px; line-height: 1.6; margin: 0;">
+                                <strong style="color: #92400e;">🔒 Security Notice:</strong> If you didn't request this password reset, please ignore this email. Your account remains secure.
+                              </p>
+                            </div>
+                            
+                            <!-- Instructions -->
+                            <div style="margin-top: 30px; padding-top: 30px; border-top: 1px solid #e5e7eb;">
+                              <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0 0 12px 0;">
+                                <strong style="color: #374151;">How to use this code:</strong>
+                              </p>
+                              <ol style="color: #6b7280; font-size: 14px; line-height: 1.8; margin: 0; padding-left: 20px;">
+                                <li>Return to the password reset page</li>
+                                <li>Enter the 6-digit code shown above</li>
+                                <li>Create your new password</li>
+                              </ol>
+                            </div>
+                          </td>
+                        </tr>
+                        
+                        <!-- Footer -->
+                        <tr>
+                          <td style="background-color: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb;">
+                            <p style="color: #9ca3af; font-size: 12px; line-height: 1.6; margin: 0 0 8px 0;">
+                              Turbo Alan Refiner - AI-Powered Text Refinement
+                            </p>
+                            <p style="color: #d1d5db; font-size: 11px; margin: 0;">
+                              This is an automated message. Please do not reply to this email.
+                            </p>
+                            <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
+                              <p style="color: #9ca3af; font-size: 11px; margin: 0;">
+                                Need help? Contact our support team or visit our website.
+                              </p>
+                            </div>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
               </body>
             </html>
             """
             
-            # Attach HTML content
+            # Create plain text version
+            text = f"""
+Turbo Alan Refiner - Password Reset Request
+
+You requested to reset your password. Use the following verification code to proceed:
+
+Your Verification Code: {otp_code}
+
+This code will expire in 10 minutes.
+
+Security Notice: If you didn't request this password reset, please ignore this email. Your account remains secure.
+
+How to use this code:
+1. Return to the password reset page
+2. Enter the 6-digit code shown above
+3. Create your new password
+
+---
+Turbo Alan Refiner - AI-Powered Text Refinement
+This is an automated message. Please do not reply to this email.
+            """.strip()
+            
+            # Attach both HTML and plain text versions
+            msg.attach(MIMEText(text, 'plain'))
             msg.attach(MIMEText(html, 'html'))
             
             # Send email
