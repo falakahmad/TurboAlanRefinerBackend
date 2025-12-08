@@ -34,7 +34,14 @@ class StripeService:
     @staticmethod
     def is_configured() -> bool:
         """Check if Stripe is properly configured."""
-        return bool(stripe.api_key)
+        api_key = stripe.api_key
+        if not api_key:
+            return False
+        # Basic validation - Stripe keys start with sk_ (secret) or pk_ (public)
+        if isinstance(api_key, str) and (api_key.startswith("sk_") or api_key.startswith("pk_")):
+            return True
+        logger.warning(f"Stripe API key format appears invalid (should start with sk_ or pk_)")
+        return False
     
     @staticmethod
     def get_stripe_client() -> Optional[stripe.Stripe]:
@@ -59,16 +66,27 @@ class StripeService:
             Customer object or None if failed
         """
         if not StripeService.is_configured():
-            logger.error("Stripe not configured")
+            logger.error("Stripe not configured - STRIPE_SECRET_KEY is missing or invalid")
             return None
         
         try:
+            # Check MongoDB connection
+            if not db.db:
+                logger.error("MongoDB database connection is not available")
+                # Continue anyway - we can still create Stripe customer without storing in DB
+            
             # Check if customer already exists in our database
-            customer_record = StripeService.get_customer_by_user_id(user_id)
+            customer_record = None
+            try:
+                customer_record = StripeService.get_customer_by_user_id(user_id)
+            except Exception as e:
+                logger.warning(f"Failed to check existing customer in database: {e}")
+            
             if customer_record and customer_record.get("stripe_customer_id"):
                 # Retrieve existing customer from Stripe
                 try:
                     customer = stripe.Customer.retrieve(customer_record["stripe_customer_id"])
+                    logger.info(f"Retrieved existing Stripe customer {customer.id} for user {user_id}")
                     return {
                         "id": customer.id,
                         "email": customer.email,
@@ -77,10 +95,11 @@ class StripeService:
                         "metadata": customer.metadata
                     }
                 except StripeError as e:
-                    logger.warning(f"Failed to retrieve existing Stripe customer: {e}")
+                    logger.warning(f"Failed to retrieve existing Stripe customer {customer_record['stripe_customer_id']}: {e}")
                     # Continue to create new customer
             
             # Create new customer in Stripe
+            logger.info(f"Creating new Stripe customer for user {user_id}, email: {email}")
             customer = stripe.Customer.create(
                 email=email,
                 name=name,
@@ -90,13 +109,20 @@ class StripeService:
                 }
             )
             
-            # Store customer in MongoDB
-            StripeService._store_customer(
-                user_id=user_id,
-                stripe_customer_id=customer.id,
-                email=email,
-                name=name
-            )
+            logger.info(f"Successfully created Stripe customer {customer.id}")
+            
+            # Store customer in MongoDB (non-blocking - continue even if this fails)
+            try:
+                stored = StripeService._store_customer(
+                    user_id=user_id,
+                    stripe_customer_id=customer.id,
+                    email=email,
+                    name=name
+                )
+                if not stored:
+                    logger.warning(f"Failed to store customer in MongoDB, but Stripe customer {customer.id} was created")
+            except Exception as e:
+                logger.warning(f"Exception while storing customer in MongoDB: {e}")
             
             logger.info(f"Created Stripe customer {customer.id} for user {user_id}")
             
@@ -109,16 +135,22 @@ class StripeService:
             }
             
         except StripeError as e:
-            logger.error(f"Stripe error creating customer: {e}")
+            error_msg = f"Stripe API error creating customer: {str(e)}"
+            if hasattr(e, 'user_message'):
+                error_msg += f" - {e.user_message}"
+            logger.error(error_msg, exc_info=True)
             return None
         except Exception as e:
-            logger.error(f"Unexpected error creating customer: {e}")
+            logger.error(f"Unexpected error creating customer: {str(e)}", exc_info=True)
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
     
     @staticmethod
     def get_customer_by_user_id(user_id: str) -> Optional[Dict[str, Any]]:
         """Get customer record from MongoDB by user ID."""
         if not db.db:
+            logger.debug("MongoDB database not available for customer lookup")
             return None
         
         try:
@@ -128,7 +160,7 @@ class StripeService:
                 customer["_id"] = str(customer["_id"])
             return customer
         except Exception as e:
-            logger.error(f"Failed to get customer from database: {e}")
+            logger.warning(f"Failed to get customer from database (non-critical): {e}")
             return None
     
     @staticmethod

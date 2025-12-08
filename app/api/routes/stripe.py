@@ -57,6 +57,7 @@ async def create_checkout_session(request: CreateCheckoutRequest):
     
     try:
         # Create or get customer
+        logger.info(f"Creating checkout session for user {request.user_id}, email: {request.email}")
         customer = stripe_service.create_or_get_customer(
             email=request.email,
             user_id=request.user_id,
@@ -64,9 +65,11 @@ async def create_checkout_session(request: CreateCheckoutRequest):
         )
         
         if not customer:
+            error_msg = "Failed to create or retrieve customer. Check logs for details."
+            logger.error(f"{error_msg} User ID: {request.user_id}, Email: {request.email}")
             raise HTTPException(
                 status_code=500,
-                detail="Failed to create or retrieve customer"
+                detail=error_msg
             )
         
         # Default URLs
@@ -298,4 +301,5 @@ async def stripe_webhook(
         logger.error(f"Error processing webhook: {e}")
         # Return 400 to indicate we didn't process the event
         raise HTTPException(status_code=400, detail=f"Webhook processing failed: {str(e)}")
+
 
