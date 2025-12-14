@@ -527,7 +527,8 @@ async def _process_refinement_pass(
             'inputChars': len(current_text),
             'outputChars': len(ft),
             'outputPath': rr.local_path if hasattr(rr, 'local_path') and rr.local_path else None,
-            'cost': pass_cost_info
+            'cost': pass_cost_info,
+            'textContent': ft  # CRITICAL: Include textContent for diff viewer and downloads
         }
         try:
             await ws_manager.broadcast(job_id, pc_evt)  # type: ignore
@@ -763,7 +764,12 @@ async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenera
                             event_type="pass_complete",
                             message=f"Completed pass {pass_num}",
                             pass_number=pass_num,
-                            details={"metrics": metrics, "success": success}
+                            details={
+                                "metrics": metrics, 
+                                "success": success,
+                                "textContent": ft,  # Store textContent for diff viewer fallback
+                                "fileId": file_id
+                            }
                         )
                         
                         # Update job status in MongoDB
