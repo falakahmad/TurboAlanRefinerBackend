@@ -250,6 +250,22 @@ class RefinementPipeline:
         # Prep with adjusted entropy
         print(f"PIPELINE: Starting PREP stage for pass {pass_index}")
         p1, _, _ = stealth_prep_pipeline(raw, [], heur, entropy_level=entropy_from_strength)
+        
+        # FIX #5: Progressive local transformation intensity
+        # Increase entropy level for more aggressive local transforms on later passes
+        if pass_index >= 2:
+            original_entropy = entropy_from_strength
+            if entropy_from_strength == 'medium':
+                entropy_from_strength = 'high'
+            elif entropy_from_strength == 'high':
+                entropy_from_strength = 'very_high'
+            elif entropy_from_strength == 'low':
+                entropy_from_strength = 'medium'
+            # Re-apply with higher entropy if changed
+            if entropy_from_strength != original_entropy:
+                p1, _, _ = stealth_prep_pipeline(p1, [], heur, entropy_level=entropy_from_strength)
+                print(f"PIPELINE: Re-applied prep with progressive entropy: {original_entropy} -> {entropy_from_strength} for pass {pass_index}")
+        
         ps.stages["prep"].status = "ok"
         ps.stages["prep"].duration_ms = (time.perf_counter() - t0) * 1000.0
         print(f"PIPELINE: PREP stage completed ({ps.stages['prep'].duration_ms:.2f}ms)")
@@ -289,10 +305,21 @@ class RefinementPipeline:
                 logger = logging.getLogger(__name__)
                 logger.warning(f"No job_id provided for pass {pass_index}")
             
+            # FIX #1: Pre-LLM aggressive local transformation layer
+            # Apply aggressive local transformations before LLM to reduce its workload
+            if pass_index > 1:  # More aggressive on later passes
+                p1 = self._aggressive_pre_llm_transform(p1, pass_index, heur)
+                print(f"PIPELINE: Applied aggressive pre-LLM transforms for pass {pass_index}")
+            
             # Phase-0: optional domain-aware chunking and placeholder compression will be applied
             print(f"PIPELINE: Calling _three_phase_refine for pass {pass_index}")
             refined, macro_results = self._three_phase_refine(p1, heur)
             print(f"PIPELINE: _three_phase_refine completed for pass {pass_index}")
+            
+            # FIX #2: Enhanced post-LLM local humanization layer
+            # Add stronger local humanization after LLM processing
+            refined = self._enhanced_post_llm_humanize(refined, pass_index, heur)
+            print(f"PIPELINE: Applied enhanced post-LLM humanization for pass {pass_index}")
         # Critic pass (regex/rule-based) on risky markers and clichés
         try:
             refined = self._critic_span_rewrite(refined)
@@ -678,27 +705,210 @@ class RefinementPipeline:
 
     # --- Critics and gates ---
     def _critic_span_rewrite(self, text: str) -> str:
+        """EXPANDED: More comprehensive AI pattern removal and sentence variation."""
         import re as _re
         t = text or ""
+        
+        # EXPANDED: More comprehensive AI pattern removal
         banned = [
+            # Original patterns
             r"\bIn conclusion,\b", r"\bOverall,\b", r"\bTo summarize,\b", r"\bThis means that\b",
             r"\bIt is important to\b", r"\bIn other words,\b",
+            # NEW: Additional AI patterns
+            r"\bIt should be noted that\b", r"\bIt is worth mentioning that\b",
+            r"\bIt is crucial to\b", r"\bIt is essential to\b",
+            r"\bThis demonstrates that\b", r"\bThis indicates that\b",
+            r"\bAs a result,\b", r"\bConsequently,\b", r"\bTherefore,\b",
+            r"\bThat is to say,\b",
+            r"\bNeedless to say,\b", r"\bIt goes without saying that\b",
+            # Overused transitions (remove some instances)
+            r"\bFurthermore,\b", r"\bMoreover,\b", r"\bAdditionally,\b",
+            # AI hedging phrases
+            r"\bIt is possible that\b", r"\bIt may be that\b",
+            r"\bOne might argue that\b", r"\bIt could be said that\b",
+            r"\bIt is worth noting that\b", r"\bIt is important to note that\b",
         ]
         for pat in banned:
-            t = _re.sub(pat, "", t)
-        # Enforce opener diversity by softening repeated sentence starts
+            t = _re.sub(pat, "", t, flags=_re.IGNORECASE)
+        
+        # Enhanced: Sentence start diversity with more variations
         sents = [s for s in _re.split(r"(?<=[.!?])\s+", t.strip()) if s]
         fixed = []
         recent = []
-        for s in sents:
+        sentence_start_variations = [
+            "Sometimes", "Often", "Typically", "Generally", "Usually",
+            "In many cases", "At times", "On occasion", "Frequently",
+            "In some instances", "Occasionally", "Periodically",
+        ]
+        
+        for i, s in enumerate(sents):
+            if not s:
+                continue
             first = (s.split()[:1] or [""])[0].lower()
-            if first in recent:
-                s = _re.sub(r"^[A-Za-z]+", "Sometimes", s)
+            if first in recent and len(s.split()) > 5:
+                # Vary the replacement based on position
+                variation = sentence_start_variations[i % len(sentence_start_variations)]
+                s = _re.sub(r"^[A-Za-z]+", variation, s)
             recent.append(first)
             if len(recent) > 3:
                 recent.pop(0)
             fixed.append(s)
+        
         return " ".join(fixed)
+
+    def _aggressive_pre_llm_transform(self, text: str, pass_index: int, heur: dict) -> str:
+        """FIX #1: Apply aggressive local transformations before LLM to reduce its workload."""
+        import re as _re
+        import random
+        
+        if not text:
+            return text
+        
+        # 1. Remove more AI patterns (expand _critic_span_rewrite patterns)
+        ai_patterns = [
+            r"\bIn conclusion,\b", r"\bTo summarize,\b", r"\bOverall,\b",
+            r"\bIt is important to note that\b", r"\bIt should be noted that\b",
+            r"\bIt is worth mentioning that\b", r"\bIt is crucial to\b",
+            r"\bFurthermore,\b", r"\bMoreover,\b", r"\bAdditionally,\b",  # Overused transitions
+            r"\bThis demonstrates that\b", r"\bThis indicates that\b",
+            r"\bAs a result,\b", r"\bConsequently,\b", r"\bTherefore,\b",
+            r"\bIn other words,\b", r"\bThat is to say,\b",
+            r"\bIt is worth noting that\b", r"\bIt is essential to\b",
+        ]
+        for pattern in ai_patterns:
+            text = _re.sub(pattern, "", text, flags=_re.IGNORECASE)
+        
+        # 2. Sentence structure variation (more aggressive)
+        sents = _re.split(r"(?<=[.!?])\s+", text)
+        varied = []
+        for i, sent in enumerate(sents):
+            if not sent:
+                continue
+            # Vary sentence starts
+            if i > 0 and sent and len(sent.split()) > 5:
+                first_word = sent.split()[0].lower()
+                if first_word in ['the', 'this', 'it', 'there', 'these', 'those']:
+                    # Sometimes restructure
+                    if pass_index >= 3 and i % 3 == 0:
+                        # Simple restructuring - keep for now, can enhance later
+                        varied.append(sent)
+                    else:
+                        varied.append(sent)
+                else:
+                    varied.append(sent)
+            else:
+                varied.append(sent)
+        text = " ".join(varied)
+        
+        # 3. Introduce natural contractions (more aggressive on later passes)
+        if pass_index >= 2:
+            contractions = {
+                r"\bdo not\b": "don't", r"\bdoes not\b": "doesn't",
+                r"\bdid not\b": "didn't", r"\bwill not\b": "won't",
+                r"\bcannot\b": "can't", r"\bcould not\b": "couldn't",
+                r"\bshould not\b": "shouldn't", r"\bwould not\b": "wouldn't",
+                r"\bis not\b": "isn't", r"\bare not\b": "aren't",
+                r"\bwas not\b": "wasn't", r"\bwere not\b": "weren't",
+                r"\bhave not\b": "haven't", r"\bhas not\b": "hasn't",
+                r"\bhad not\b": "hadn't", r"\bmust not\b": "mustn't",
+            }
+            # Apply 30-50% of contractions based on pass
+            random.seed(hash(text) % 1000)  # Deterministic but varied
+            for pattern, replacement in contractions.items():
+                replacement_prob = 0.3 + 0.2 * min((pass_index - 1) / 3, 1.0)  # 30% to 50%
+                if random.random() < replacement_prob:
+                    text = _re.sub(pattern, replacement, text, flags=_re.IGNORECASE)
+        
+        # 4. Punctuation variation (more natural)
+        # Add occasional dashes, etc.
+        if pass_index >= 2:
+            sentences = _re.split(r"(?<=[.!?])\s+", text)
+            varied_sents = []
+            for i, sent in enumerate(sentences):
+                if i > 0 and len(sent) > 20 and i % 7 == 0:  # Rare
+                    # Sometimes use dash instead of comma
+                    sent = _re.sub(r",\s+", " — ", sent, count=1)
+                varied_sents.append(sent)
+            text = " ".join(varied_sents)
+        
+        return text
+
+    def _enhanced_post_llm_humanize(self, text: str, pass_index: int, heur: dict) -> str:
+        """FIX #2: Enhanced local humanization after LLM processing."""
+        import re as _re
+        
+        if not text:
+            return text
+        
+        # 1. Synonym replacement using simple word mapping (no embeddings needed)
+        # Replace common AI words with more natural alternatives
+        synonym_map = {
+            'utilize': 'use', 'facilitate': 'help', 'implement': 'do',
+            'demonstrate': 'show', 'indicate': 'show', 'illustrate': 'show',
+            'significant': 'important', 'substantial': 'large',
+            'numerous': 'many', 'various': 'different',
+            'obtain': 'get', 'acquire': 'get', 'procure': 'get',
+            'commence': 'start', 'initiate': 'start',
+            'terminate': 'end', 'finalize': 'finish',
+            'approximately': 'about', 'around': 'about',
+        }
+        
+        if pass_index >= 2:
+            for ai_word, natural_word in synonym_map.items():
+                pattern = r'\b' + _re.escape(ai_word) + r'\b'
+                # Replace 50-80% based on pass
+                matches = _re.findall(pattern, text, flags=_re.IGNORECASE)
+                if matches:
+                    replacement_count = max(1, len(matches) * (50 + 30 * min((pass_index - 1) / 3, 1.0)) // 100)
+                    count = 0
+                    def replacer(match):
+                        nonlocal count
+                        count += 1
+                        if count <= replacement_count:
+                            return natural_word
+                        return match.group(0)
+                    text = _re.sub(pattern, replacer, text, flags=_re.IGNORECASE)
+        
+        # 2. More aggressive sentence splitting for variety
+        if pass_index >= 2:
+            sents = _re.split(r"(?<=[.!?])\s+", text)
+            varied = []
+            for sent in sents:
+                if not sent:
+                    continue
+                # Split long sentences more aggressively
+                words = sent.split()
+                if len(words) > 25:
+                    # Split on conjunctions
+                    parts = _re.split(r'\s+(and|but|or|so|yet)\s+', sent, maxsplit=1)
+                    if len(parts) > 1:
+                        varied.append(parts[0] + '.')
+                        if len(parts) > 2:
+                            # Capitalize the conjunction and continue
+                            conj = parts[1] if len(parts) > 1 else ''
+                            rest = parts[2] if len(parts) > 2 else ''
+                            if rest:
+                                varied.append(conj.capitalize() + ' ' + rest)
+                    else:
+                        varied.append(sent)
+                else:
+                    varied.append(sent)
+            text = " ".join(varied)
+        
+        # 3. Natural filler injection (sparingly, only on pass 3+)
+        if pass_index >= 3:
+            natural_fillers = ['well,', 'you know,', 'I mean,', 'actually,', 'basically,']
+            sents = _re.split(r"(?<=[.!?])\s+", text)
+            varied = []
+            for i, sent in enumerate(sents):
+                if i > 0 and len(sent.split()) > 10 and i % 10 == 0:  # Rare (10% of sentences)
+                    filler = natural_fillers[i % len(natural_fillers)]
+                    if sent and len(sent) > 0:
+                        sent = filler + " " + sent[0].lower() + sent[1:]
+                varied.append(sent)
+            text = " ".join(varied)
+        
+        return text
 
     def _avg_stage_latency(self, ps: PassState) -> float:
         ms = [s.duration_ms for s in ps.stages.values() if s.status in ("ok","warn","fail")]
