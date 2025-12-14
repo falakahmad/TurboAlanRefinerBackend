@@ -1230,7 +1230,7 @@ async def serve_file_by_name(filename: str):
     Serve a file from the output directory by filename.
     This endpoint is used by the frontend to download processed files.
     """
-    from app.core.paths import get_output_dir
+    from app.core.paths import get_output_dir, _is_vercel
     
     if not filename:
         raise APIError("Filename is required", 400, "MISSING_FILENAME")
@@ -1256,7 +1256,40 @@ async def serve_file_by_name(filename: str):
     
     # Check if file exists
     if not os.path.exists(resolved_path) or not os.path.isfile(resolved_path):
-        raise APIError(f"File not found: {filename}", 404, "FILE_NOT_FOUND")
+        # On Vercel, files in /tmp are ephemeral and may not persist
+        # Try to find the file content from job events/snapshot as fallback
+        if _is_vercel():
+            # Try to find file content from recent job events
+            # This is a best-effort fallback for ephemeral storage
+            try:
+                # Search through job snapshots for this filename
+                from app.core.state import jobs_snapshot
+                for job_id, job_data in jobs_snapshot.items():
+                    if isinstance(job_data, dict):
+                        # Check if this job has file content for this filename
+                        if job_data.get('type') == 'pass_complete' and job_data.get('outputPath'):
+                            output_path = job_data.get('outputPath', '')
+                            if filename in output_path or os.path.basename(output_path) == filename:
+                                text_content = job_data.get('textContent')
+                                if text_content:
+                                    # Return text content directly
+                                    return StreamingResponse(
+                                        io.BytesIO(text_content.encode('utf-8')),
+                                        media_type='text/plain; charset=utf-8',
+                                        headers={
+                                            "Content-Disposition": f'attachment; filename="{filename}"',
+                                            "Cache-Control": "no-cache, no-store, must-revalidate",
+                                        }
+                                    )
+            except Exception:
+                # If fallback fails, continue to raise the original error
+                pass
+        
+        raise APIError(
+            f"File not found: {filename}. On Vercel, files in /tmp are ephemeral and may not persist. Please use the textContent from events for downloads.",
+            404, 
+            "FILE_NOT_FOUND"
+        )
     
     # Determine content type
     ext = Path(filename).suffix.lower()
