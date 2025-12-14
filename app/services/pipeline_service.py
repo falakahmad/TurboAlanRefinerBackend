@@ -1212,10 +1212,16 @@ class RefinementPipeline:
         # 2) Determine phases and temperatures influenced by global aggressiveness, weights, and entropy management
         print(f"_three_phase_refine: Determining phases and temperatures")
         aggr = (self.settings.aggressiveness or "Auto").lower()
+        
+        # CRITICAL FIX: Add explicit humanization instructions to system prompts
+        # This ensures the LLM actively works to make text appear more human-like
         if aggr == "low":
-            phases = [("Targeted Cleaner", 0.25)]
+            phases = [("You are a text refinement expert. Your goal is to make AI-generated text appear more natural and human-written. Clean up obvious AI patterns, improve flow, and make the writing feel more conversational while preserving meaning. Focus on removing robotic phrasing and making sentences flow naturally.", 0.25)]
         elif aggr == "medium":
-            phases = [("Pattern Scrubber", 0.3), ("Polisher", 0.35)]
+            phases = [
+                ("You are a text refinement expert. Your goal is to make AI-generated text appear more natural and human-written. Remove AI detection patterns, vary sentence structure, and introduce natural variation in phrasing. Make the text feel like it was written by a human, not an AI.", 0.3),
+                ("You are a text refinement expert. Your goal is to make AI-generated text appear more natural and human-written. Polish the text to feel completely human-written. Add subtle imperfections, natural transitions, and conversational elements that make it indistinguishable from human writing.", 0.35)
+            ]
         else:
             # Temperature shaping: persuasion ↑ temp, formality & brevity ↓ temp, clarity slight ↓ for stability
             base = 0.4
@@ -1238,15 +1244,17 @@ class RefinementPipeline:
             refine_t  = clamp(base + 0.02 + 0.10 * risk)          # Higher temp for high risk (creative)
             polish_t  = clamp(base - 0.02 - 0.08 * (1.0 - risk))  # Lower temp for low risk (precise)
             phases = [
-                ("Strategy-Guided Cleanup", cleanup_t),
-                ("Strategy-Guided Refinement", refine_t),
-                ("Strategy-Guided Polish", polish_t),
+                ("You are a text refinement expert. Your goal is to make AI-generated text appear more natural and human-written. In this cleanup phase, remove obvious AI patterns, fix robotic phrasing, and improve sentence flow. Make the text feel more conversational and natural while preserving all meaning.", cleanup_t),
+                ("You are a text refinement expert. Your goal is to make AI-generated text appear more natural and human-written. In this refinement phase, actively transform the text to feel human-written. Vary sentence structure, introduce natural imperfections, use varied vocabulary, and make it read like a human wrote it - not an AI. Be creative in making it feel authentic.", refine_t),
+                ("You are a text refinement expert. Your goal is to make AI-generated text appear more natural and human-written. In this polish phase, ensure the text is completely indistinguishable from human writing. Add subtle natural variations, conversational elements, and authentic human writing patterns. The final output should read as if written by a skilled human writer.", polish_t),
             ]
 
         # 3) Build dynamic guidance from weights + microstructure + tone + anti-scanner
         guidance_lines = [
             "REFINEMENT PHASE (Strategy-Guided):",
             f"Strategy Context: clarity={clarity:.2f}, persuasion={persuasion:.2f}, brevity={brevity:.2f}, formality={formality:.2f}",
+            "",
+            "CRITICAL HUMANIZATION GOAL: Make this text appear completely human-written. Remove all AI detection patterns, vary sentence structure naturally, introduce subtle imperfections, and ensure it reads as if written by a skilled human writer - not an AI.",
             "",
         ]
         guidance_lines.append(f"Priority: primary={plan.primary_strategy}, secondary={plan.secondary_strategy}, modulators={', '.join(plan.modulators) if plan.modulators else 'none'}")
