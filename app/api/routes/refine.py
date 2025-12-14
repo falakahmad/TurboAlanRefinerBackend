@@ -229,10 +229,38 @@ async def _validate_and_resolve_file_path(file_info: Dict[str, Any], file_id: st
             raise APIError(f"Failed to download Google Drive file: {str(e)}", 500, "DRIVE_DOWNLOAD_FAILED")
     
     # Try to get file path from uploaded_files registry first
+    # CRITICAL FIX: Check multiple possible file_id variations for multi-file support
+    file_path = None
+    
+    # First, try the exact file_id
     if file_id in uploaded_files:
         file_path = uploaded_files[file_id].get("temp_path") or uploaded_files[file_id].get("path")
-    else:
-        # Fallback to file_info paths - check multiple possible path fields
+    
+    # If not found, try looking up by drive_id or other identifiers
+    if not file_path:
+        # Check if file_info has a drive_id that matches any uploaded file
+        drive_id = file_info.get("driveId") or file_info.get("drive_id")
+        if drive_id:
+            for stored_file_id, stored_info in uploaded_files.items():
+                if stored_info.get("drive_id") == drive_id or stored_info.get("id") == drive_id:
+                    file_path = stored_info.get("temp_path") or stored_info.get("path")
+                    logger.debug(f"Found file by drive_id: {drive_id} -> {file_path}")
+                    break
+        
+        # Also try matching by source/path
+        if not file_path:
+            source = file_info.get("source") or file_info.get("path") or ""
+            if source:
+                for stored_file_id, stored_info in uploaded_files.items():
+                    stored_path = stored_info.get("temp_path") or stored_info.get("path") or ""
+                    stored_source = stored_info.get("source") or ""
+                    if source in stored_path or source in stored_source or stored_path in source:
+                        file_path = stored_path
+                        logger.debug(f"Found file by source/path: {source} -> {file_path}")
+                        break
+    
+    # Fallback to file_info paths - check multiple possible path fields
+    if not file_path:
         file_path = (file_info.get("path") or 
                    file_info.get("temp_path") or 
                    file_info.get("source") or "")
@@ -584,9 +612,11 @@ async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenera
     processed_files = 0  # Track successfully processed files
     logger.debug(f"Processing {len(request.files)} files")
     try:
-        for file_info in request.files:
+        for file_idx, file_info in enumerate(request.files):
             file_id = file_info.get("id", "unknown")
             file_name = file_info.get("name", file_info.get("fileName", Path(file_id).name if '/' in file_id else file_id))
+            
+            logger.debug(f"Processing file {file_idx + 1}/{len(request.files)}: file_id={file_id}, file_name={file_name}, type={file_info.get('type')}, source={file_info.get('source')}")
             
             try:
                 # Check if we have direct text content (Resume scenario)
@@ -600,8 +630,13 @@ async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenera
                     msg = {'type': 'stage_update', 'jobId': job_id, 'fileId': file_id, 'fileName': file_name, 'stage': 'resume', 'status': 'completed', 'message': f'Resumed with {len(original_text)} characters'}
                     yield f"{safe_encoder(msg)}\n\n"
                 else:
+                    # CRITICAL FIX: Enhanced file path resolution with better logging
+                    logger.debug(f"Resolving file path for file_id={file_id}, checking uploaded_files registry...")
+                    logger.debug(f"Available file_ids in registry: {list(uploaded_files.keys())[:10]}")  # Log first 10 for debugging
+                    
                     # Validate and resolve file path
                     file_path = await _validate_and_resolve_file_path(file_info, file_id)
+                    logger.debug(f"Resolved file path: {file_path}")
                     
                     # Read and validate file content
                     original_text = await _read_and_validate_file(file_path, file_id, job_id)
@@ -612,9 +647,19 @@ async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenera
                 
             except APIError as e:
                 # Handle file not found or other API errors
-                err = {'type': 'error', 'jobId': job_id, 'fileId': file_id, 'error': e.message}
+                logger.error(f"File processing error for file_id={file_id}, file_name={file_name}: {e.message}")
+                err = {'type': 'error', 'jobId': job_id, 'fileId': file_id, 'fileName': file_name, 'error': e.message, 'error_code': e.error_code}
                 safe_jobs_snapshot_set(job_id, err)
                 yield f"{safe_encoder(err)}\n\n"
+                # Continue processing other files instead of stopping
+                continue
+            except Exception as e:
+                # Handle unexpected errors
+                logger.error(f"Unexpected error processing file_id={file_id}, file_name={file_name}: {str(e)}", exc_info=True)
+                err = {'type': 'error', 'jobId': job_id, 'fileId': file_id, 'fileName': file_name, 'error': f"Unexpected error: {str(e)}", 'error_code': 'UNEXPECTED_ERROR'}
+                safe_jobs_snapshot_set(job_id, err)
+                yield f"{safe_encoder(err)}\n\n"
+                # Continue processing other files instead of stopping
                 continue
             
             # Track the current text for each pass (starts with original)
@@ -1080,6 +1125,17 @@ async def refine_run(request: RefinementRequest):
         "current_stage": "initializing"
     }
     safe_jobs_snapshot_set(job_id, initial_job_state)
+    
+    # CRITICAL FIX: Also store in in-memory database immediately for backward compatibility
+    try:
+        from app.core.database import upsert_job
+        upsert_job(job_id, {
+            "status": "running",
+            "progress": 0.0,
+            "current_stage": "initializing"
+        })
+    except Exception as e:
+        logger.warning(f"Failed to store job in in-memory DB: {e}")
     
     try:
         if mongodb_db.is_connected():
