@@ -16,7 +16,7 @@ from app.models.domain import PassState, StageState, PassMetrics, PassTexts, Run
 from app.core.settings import Settings
 from app.core.language_model import LanguageModel
 from app.core.storage import OutputSink, LocalSink
-from app.services.pipeline import stealth_prep_pipeline, post_pass_adjustments, protect_markdown_structures, restore_markdown_structures, validate_markdown_structures, generate_sidecar_annotations, inject_inline_annotations
+from app.services.pipeline import stealth_prep_pipeline, post_pass_adjustments, protect_markdown_structures, restore_markdown_structures, validate_markdown_structures, generate_sidecar_annotations, inject_inline_annotations, _humanizer_filter, _strategy_insight_det
 from app.utils.utils import read_text_from_file, write_text_to_file, derive_history_profile
 from app.core.logger import log_event, log_exception, log_performance, log_metrics
 from app.core.file_versions import file_version_manager
@@ -326,6 +326,9 @@ class RefinementPipeline:
         except Exception as e:
             log_exception("CRITIC_PASS_ERROR", e)
             # Continue with refined text as-is if critic pass fails
+
+        # Light post-critic reflow (deterministic, no LLM)
+        refined = self._post_critic_reflow(refined)
         # Restore structures after refine
         try:
             if mapping:
@@ -755,6 +758,30 @@ class RefinementPipeline:
             fixed.append(s)
         
         return " ".join(fixed)
+
+    def _post_critic_reflow(self, text: str) -> str:
+        """Light deterministic reflow after critic pass to reduce LLM load."""
+        import re as _re
+        if not text:
+            return text
+        t = text
+        # Normalize spacing/newlines
+        t = _re.sub(r"\n{3,}", "\n\n", t)
+        # Apply lightweight humanizer filter (deterministic)
+        try:
+            t = _humanizer_filter(t)
+        except Exception:
+            pass
+        # Apply lightweight strategy insight cleaner (removes clichés/filler)
+        try:
+            t = _strategy_insight_det(t)
+        except Exception:
+            pass
+        # Trim extra spaces
+        t = _re.sub(r"\s+\n", "\n", t)
+        t = _re.sub(r"\n\s+", "\n", t)
+        t = _re.sub(r"\s{2,}", " ", t)
+        return t
 
     def _aggressive_pre_llm_transform(self, text: str, pass_index: int, heur: dict) -> str:
         """FIX #1: Apply aggressive local transformations before LLM to reduce its workload."""
