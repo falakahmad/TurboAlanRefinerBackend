@@ -1078,25 +1078,40 @@ async def history_profile() -> Dict[str, float]:
 @app.post("/files/upload")
 @handle_api_error
 async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
+    logger.info(f"[/files/upload] Received upload request for file: {file.filename}")
+    
     if not file.filename:
+        logger.error("[/files/upload] No filename provided")
         raise APIError("No filename provided", 400, "MISSING_FILENAME")
     
-    # Validate filename for security - comprehensive path traversal protection
-    if not file.filename or len(file.filename) > 255:
+    # Extract just the filename (remove any path components from different OS/browsers)
+    # Browsers may send full path on Windows or just filename on Mac/Linux
+    import os.path
+    original_filename = file.filename
+    safe_filename = os.path.basename(file.filename.replace('\\', '/'))  # Handle both Windows and Unix paths
+    
+    logger.debug(f"[/files/upload] Original filename: {original_filename}, Safe filename: {safe_filename}")
+    
+    # Validate filename for security
+    if not safe_filename or len(safe_filename) > 255:
+        logger.error(f"[/files/upload] Invalid filename length: {len(safe_filename) if safe_filename else 0}")
         raise APIError("Invalid filename", 400, "INVALID_FILENAME")
     
-    # Normalize path and check for traversal attempts
-    import os.path
-    normalized_path = os.path.normpath(file.filename)
-    if normalized_path != file.filename or '..' in normalized_path or normalized_path.startswith('/') or normalized_path.startswith('\\'):
+    # Check for path traversal in the sanitized filename
+    if '..' in safe_filename:
+        logger.error(f"[/files/upload] Path traversal detected in filename: {safe_filename}")
         raise APIError("Invalid filename - path traversal detected", 400, "PATH_TRAVERSAL_DETECTED")
     
-    # Additional security checks
+    # Additional security checks for dangerous characters
     dangerous_chars = ['<', '>', ':', '"', '|', '?', '*', '\x00']
-    if any(char in file.filename for char in dangerous_chars):
+    if any(char in safe_filename for char in dangerous_chars):
+        logger.error(f"[/files/upload] Dangerous characters in filename: {safe_filename}")
         raise APIError("Invalid filename - contains dangerous characters", 400, "DANGEROUS_CHARACTERS")
     
-    filename_lower = file.filename.lower()
+    # Use safe_filename from here on
+    filename_to_use = safe_filename
+    
+    filename_lower = filename_to_use.lower()
     if filename_lower.endswith('.txt'):
         file_type, mime_type = "txt", "text/plain"
     elif filename_lower.endswith('.docx'):
@@ -1108,7 +1123,10 @@ async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
     elif filename_lower.endswith('.md'):
         file_type, mime_type = "md", "text/markdown"
     else:
+        logger.error(f"[/files/upload] Unsupported file type: {filename_to_use}")
         raise APIError("Unsupported file type. Supported: .txt, .docx, .doc, .pdf, .md", 400, "UNSUPPORTED_FILE_TYPE")
+    
+    logger.info(f"[/files/upload] Detected file type: {file_type} for {filename_to_use}")
     
     # Validate file size BEFORE reading content to prevent memory exhaustion
     
@@ -1128,13 +1146,20 @@ async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
                 break
             total_read += len(chunk)
             if total_read > MAX_FILE_SIZE:
+                logger.error(f"[/files/upload] File too large: {total_read} bytes > {MAX_FILE_SIZE}")
                 raise APIError(f"File content too large. Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB", 400, "FILE_CONTENT_TOO_LARGE")
             content += chunk
+    except APIError:
+        raise  # Re-raise our own API errors
     except Exception as e:
+        logger.error(f"[/files/upload] Error reading file: {e}")
         raise APIError(f"Error reading file: {str(e)}", 400, "FILE_READ_ERROR")
+    
+    logger.debug(f"[/files/upload] Read {len(content)} bytes from file")
     
     # Validate file content matches declared type
     if not validate_file_content(content, file_type):
+        logger.error(f"[/files/upload] Content validation failed for {filename_to_use} (expected {file_type})")
         raise APIError(f"File content does not match declared type: {file_type}", 400, "FILE_CONTENT_MISMATCH")
     
     suffix = f".{file_type}"
@@ -1147,26 +1172,37 @@ async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
         async with aiofiles.open(temp_file.name, 'wb') as f:
             await f.write(content)
         
-        file_id = f"file_{len(content)}_{hash(file.filename) % 10000}"
+        # Generate unique file_id using timestamp to prevent collisions
+        # Previously used only content size + filename hash, which caused identical IDs 
+        # for files with same name/size uploaded multiple times
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        file_id = f"file_{int(time.time())}_{unique_id}"
+        
+        uploaded_at = time.time()
         file_info = {
-            "filename": file.filename,
+            "filename": filename_to_use,  # Use sanitized filename
+            "original_filename": original_filename,  # Keep original for reference
             "temp_path": temp_file.name,
             "size": len(content),
             "file_type": file_type,
             "mime_type": mime_type,
-            "uploaded_at": time.time()
+            "uploaded_at": uploaded_at
         }
         safe_uploaded_files_set(file_id, file_info)
         
+        logger.info(f"[/files/upload] Successfully uploaded {filename_to_use} as {file_id} ({len(content)} bytes)")
+        
         return FileUploadResponse(
             file_id=file_id,
-            filename=file.filename,
+            filename=filename_to_use,  # Return sanitized filename
             size=len(content),
             temp_path=temp_file.name,
             file_type=file_type,
             mime_type=mime_type
         )
     except Exception as e:
+        logger.error(f"[/files/upload] Error saving temp file: {e}")
         # Clean up temp file on any error
         if temp_file and os.path.exists(temp_file.name):
             try:
@@ -1174,6 +1210,9 @@ async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
             except OSError:
                 pass
         raise APIError(f"File upload failed: {str(e)}", 500, "FILE_UPLOAD_ERROR")
+    finally:
+        # Always close the upload file handle to prevent resource leaks
+        await file.close()
 
 # Enhanced file download with format conversion
 @app.post("/files/download")
