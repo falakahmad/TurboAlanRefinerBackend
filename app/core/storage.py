@@ -30,10 +30,24 @@ class LocalSink:
 
     def write(self, local_tmp_path: str, dest_name: str) -> str:
         # Preserve original extension if dest_name has none
-        ext = os.path.splitext(local_tmp_path)[1]
-        if not os.path.splitext(dest_name)[1] and ext:
-            dest_name = dest_name + ext
+        source_ext = os.path.splitext(local_tmp_path)[1]
+        dest_ext = os.path.splitext(dest_name)[1]
+        
+        # CRITICAL FIX: Always ensure extension is preserved for document types
+        # Log for debugging extension issues
+        logger.debug(f"LocalSink.write: source={local_tmp_path}, dest_name={dest_name}, source_ext={source_ext}, dest_ext={dest_ext}")
+        
+        if not dest_ext and source_ext:
+            dest_name = dest_name + source_ext
+            logger.debug(f"LocalSink.write: Added source extension to dest_name: {dest_name}")
+        elif dest_ext and source_ext and dest_ext.lower() != source_ext.lower():
+            # Extension mismatch - prefer source extension for document types
+            if source_ext.lower() in ['.docx', '.doc', '.pdf']:
+                logger.warning(f"LocalSink.write: Extension mismatch! source={source_ext}, dest={dest_ext}. Using source extension.")
+                dest_name = os.path.splitext(dest_name)[0] + source_ext
+        
         dest = os.path.join(self.output_dir, dest_name)
+        logger.debug(f"LocalSink.write: Final destination path: {dest}")
 
         # Validate source file exists
         if not os.path.exists(local_tmp_path):
