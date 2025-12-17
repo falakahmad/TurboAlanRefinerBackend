@@ -46,6 +46,17 @@ class RefinementPipeline:
         self._max_parallel_workers = int(os.getenv("REFINER_MAX_PARALLEL_WORKERS", "4") or 4)
         # Ensure at least 1 worker and at most 10 (safety limit)
         self._max_parallel_workers = max(1, min(10, self._max_parallel_workers))
+        
+        # CRITICAL FIX: Store original file extension for multi-pass processing (per job_id)
+        # This ensures Word docs stay as Word docs across all passes
+        # Using dicts keyed by job_id to avoid race conditions in the singleton pipeline
+        import threading
+        self._job_extensions: Dict[str, str] = {}  # job_id -> original extension
+        self._job_file_types: Dict[str, str] = {}  # job_id -> original file type
+        self._job_lock = threading.Lock()  # Thread-safe access to job-specific data
+        
+        # Cleanup old job data after 2 hours (prevents memory leaks)
+        self._job_data_max_age_seconds = 2 * 60 * 60
 
     # ---- Phase-0 helpers ----
     def _get_model_name(self) -> Optional[str]:
@@ -71,6 +82,37 @@ class RefinementPipeline:
             # heuristic fallback ~4 chars/token
             return (len(text) + 3) // 4
         return len(enc.encode(text))
+
+    # ---- Job-specific extension tracking (thread-safe) ----
+    def _get_job_extension(self, job_id: str) -> str:
+        """Get the original file extension for a job (thread-safe)."""
+        with self._job_lock:
+            return self._job_extensions.get(job_id, '.txt')
+    
+    def _get_job_file_type(self, job_id: str) -> str:
+        """Get the original file type for a job (thread-safe)."""
+        with self._job_lock:
+            return self._job_file_types.get(job_id, 'txt')
+    
+    def _cleanup_old_job_data(self) -> None:
+        """Remove job data older than max age to prevent memory leaks.
+        Must be called while holding _job_lock."""
+        # Simple cleanup: if we have more than 100 jobs tracked, remove oldest half
+        # This is a simple approach; a more sophisticated approach would track timestamps
+        max_jobs = 100
+        if len(self._job_extensions) > max_jobs:
+            # Remove oldest entries (first half of keys)
+            keys_to_remove = list(self._job_extensions.keys())[:max_jobs // 2]
+            for key in keys_to_remove:
+                self._job_extensions.pop(key, None)
+                self._job_file_types.pop(key, None)
+            print(f"PIPELINE: Cleaned up {len(keys_to_remove)} old job extension entries")
+    
+    def cleanup_job_data(self, job_id: str) -> None:
+        """Explicitly cleanup job data when a job completes (thread-safe)."""
+        with self._job_lock:
+            self._job_extensions.pop(job_id, None)
+            self._job_file_types.pop(job_id, None)
 
     _DOMAIN_SPLITS = [
         r"\n##\s*(Findings|Impression|Assessment|Plan)\b",
@@ -258,8 +300,47 @@ class RefinementPipeline:
         result = RunResult(file_path=input_path, pass_index=pass_index, success=False)
 
         # Read - CRITICAL FIX: Use previous pass output if available, otherwise read from file
-        print(f"PIPELINE: Starting READ stage for pass {pass_index}")
+        print(f"PIPELINE: Starting READ stage for pass {pass_index}, job_id={job_id}")
         t0 = time.perf_counter()
+        
+        # CRITICAL FIX: On first pass, capture and store the original file extension (per job_id)
+        # This ensures Word docs (.docx) remain as Word docs across all passes
+        # Use job_id-keyed storage to avoid race conditions in the singleton pipeline
+        effective_job_id = job_id or "default"
+        if pass_index == 1:
+            _, original_ext = os.path.splitext(input_path)
+            if original_ext:
+                if not original_ext.startswith('.'):
+                    original_ext = '.' + original_ext
+                original_ext = original_ext.lower()
+                
+                # Determine file type for proper handling
+                if original_ext == '.docx':
+                    file_type = 'docx'
+                elif original_ext == '.doc':
+                    file_type = 'doc'
+                elif original_ext == '.pdf':
+                    file_type = 'pdf'
+                elif original_ext == '.md':
+                    file_type = 'md'
+                else:
+                    file_type = 'txt'
+                
+                # Thread-safe storage of job-specific extension data
+                with self._job_lock:
+                    self._job_extensions[effective_job_id] = original_ext
+                    self._job_file_types[effective_job_id] = file_type
+                    # Cleanup old job data to prevent memory leaks
+                    self._cleanup_old_job_data()
+                
+                print(f"PIPELINE: Captured original extension for job {effective_job_id}: {original_ext}, type: {file_type}")
+            else:
+                # No extension found, default to .txt
+                with self._job_lock:
+                    self._job_extensions[effective_job_id] = '.txt'
+                    self._job_file_types[effective_job_id] = 'txt'
+                print(f"PIPELINE: No extension found for job {effective_job_id}, defaulting to .txt")
+        
         if prev_final_text and pass_index > 1:
             # Use previous pass output for cumulative refinement
             raw = prev_final_text
@@ -504,11 +585,21 @@ class RefinementPipeline:
         # Write local temp
         t0 = time.perf_counter()
         base, ext = os.path.splitext(os.path.basename(input_path))
-        # Ensure ext starts with a dot
-        if ext and not ext.startswith('.'):
+        
+        # CRITICAL FIX: Use job-specific stored original extension to preserve file format across passes
+        # This ensures Word docs (.docx) remain as Word docs, not .txt files
+        # Thread-safe: uses job_id-keyed storage to avoid race conditions in singleton pipeline
+        job_ext = self._get_job_extension(effective_job_id)
+        if job_ext and job_ext != '.txt':
+            ext = job_ext
+            print(f"PIPELINE: Using stored original extension for job {effective_job_id}: {ext}")
+        elif ext and not ext.startswith('.'):
             ext = '.' + ext
         elif not ext:
-            ext = '.txt'  # Default extension if none found
+            ext = job_ext if job_ext else '.txt'  # Use job extension or default
+        
+        # Log the extension being used for debugging
+        print(f"PIPELINE: Writing pass {pass_index} output for job {effective_job_id} with extension: {ext}, base: {base}")
         
         output_dir = os.getenv("TMPDIR", os.getenv("TEMP", "/tmp"))
         local_out = write_text_to_file(
@@ -519,6 +610,7 @@ class RefinementPipeline:
             original_file=input_path,
             iteration=pass_index,
         )
+        print(f"PIPELINE: Output written to: {local_out}")
         ps.stages["write"].status = "ok"
         ps.stages["write"].duration_ms = (time.perf_counter() - t0) * 1000.0
         result.local_path = local_out
