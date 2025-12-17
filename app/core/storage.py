@@ -42,7 +42,7 @@ class LocalSink:
             logger.debug(f"LocalSink.write: Added source extension to dest_name: {dest_name}")
         elif dest_ext and source_ext and dest_ext.lower() != source_ext.lower():
             # Extension mismatch - prefer source extension for document types
-            if source_ext.lower() in ['.docx', '.doc', '.pdf']:
+            if source_ext.lower() in ['.docx', '.doc', '.pdf', '.md', '.txt']:
                 logger.warning(f"LocalSink.write: Extension mismatch! source={source_ext}, dest={dest_ext}. Using source extension.")
                 dest_name = os.path.splitext(dest_name)[0] + source_ext
         
