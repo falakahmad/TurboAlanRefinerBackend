@@ -800,11 +800,101 @@ def write_text_to_file(text: str = None, file_path: str = None, output_dir: str 
                 pass
         return write_docx_with_skeleton(text, file_path, skeleton)
     
-    # Write plain text
+    # Handle DOC format (legacy) - convert to DOCX instead since python-docx doesn't write DOC
+    if ext == '.doc' or (file_path and file_path.endswith('.doc')):
+        # DOC is a legacy binary format that's hard to write
+        # Save as DOCX instead with the same styling
+        docx_path = file_path.replace('.doc', '.docx') if file_path.endswith('.doc') else file_path + 'x'
+        skeleton = None
+        if original_file and os.path.exists(original_file):
+            # Try to read skeleton from original DOC file (may fail)
+            try:
+                # Convert DOC to DOCX for skeleton extraction (best effort)
+                pass  # skeleton extraction from DOC is complex, skip for now
+            except Exception:
+                pass
+        result = write_docx_with_skeleton(text, docx_path, skeleton)
+        # Log the conversion
+        print(f"Note: Converted DOC output to DOCX: {result}")
+        return result
+    
+    # Handle PDF format
+    if ext == '.pdf' or (file_path and file_path.endswith('.pdf')):
+        return _write_text_to_pdf(text, file_path)
+    
+    # Handle Markdown - preserve it as plain text with .md extension
+    if ext == '.md' or (file_path and file_path.endswith('.md')):
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return file_path
+    
+    # Write plain text (TXT and anything else)
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(text)
     
     return file_path
+
+
+def _write_text_to_pdf(text: str, file_path: str) -> str:
+    """Write text to a PDF file using reportlab or fpdf2."""
+    try:
+        # Try fpdf2 first (lighter weight)
+        from fpdf import FPDF
+        
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        pdf.set_font("Helvetica", size=11)
+        
+        # Handle text encoding and line breaks
+        lines = text.split('\n')
+        for line in lines:
+            # Encode line to handle special characters
+            try:
+                # FPDF2 handles unicode better than fpdf
+                pdf.multi_cell(0, 6, line)
+            except Exception:
+                # Fallback: encode to latin-1 with replacement
+                safe_line = line.encode('latin-1', errors='replace').decode('latin-1')
+                pdf.multi_cell(0, 6, safe_line)
+        
+        pdf.output(file_path)
+        return file_path
+    except ImportError:
+        pass
+    
+    try:
+        # Fallback to reportlab
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        
+        doc = SimpleDocTemplate(file_path, pagesize=letter)
+        styles = getSampleStyleSheet()
+        story = []
+        
+        # Split text into paragraphs
+        paragraphs = text.split('\n\n')
+        for para in paragraphs:
+            if para.strip():
+                # Clean up for reportlab
+                safe_para = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                story.append(Paragraph(safe_para, styles['Normal']))
+                story.append(Spacer(1, 0.2*inch))
+        
+        doc.build(story)
+        return file_path
+    except ImportError:
+        pass
+    
+    # Last resort: save as TXT with .pdf.txt extension
+    txt_path = file_path + '.txt'
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write(text)
+    print(f"Warning: PDF libraries not available. Saved as text file: {txt_path}")
+    return txt_path
 
 # ---------------------------
 # Google Drive utilities
