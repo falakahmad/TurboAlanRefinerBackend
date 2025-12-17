@@ -253,16 +253,25 @@ async def _validate_and_resolve_file_path(file_info: Dict[str, Any], file_id: st
                 logger.warning(f"Extension mismatch for {file_id}: temp_path ext='{actual_ext}', file_type='{stored_file_type}'")
                 # The temp file should already have correct extension from upload, but log for debugging
     
-    # If not found, try looking up by drive_id or other identifiers
+    # CRITICAL FIX: If not found by file_id, try looking up by backendFileId or driveId
+    # The frontend may send the backend's file_id in these fields
     if not file_path:
-        # Check if file_info has a drive_id that matches any uploaded file
-        drive_id = file_info.get("driveId") or file_info.get("drive_id")
-        if drive_id:
-            for stored_file_id, stored_info in uploaded_files.items():
-                if stored_info.get("drive_id") == drive_id or stored_info.get("id") == drive_id:
-                    file_path = stored_info.get("temp_path") or stored_info.get("path")
-                    logger.debug(f"Found file by drive_id: {drive_id} -> {file_path}")
-                    break
+        backend_file_id = file_info.get("backendFileId") or file_info.get("driveId") or file_info.get("drive_id")
+        if backend_file_id:
+            # First, try direct lookup - the backend_file_id might BE the key in uploaded_files
+            if backend_file_id in uploaded_files:
+                file_info_stored = uploaded_files[backend_file_id]
+                file_path = file_info_stored.get("temp_path") or file_info_stored.get("path")
+                stored_file_type = file_info_stored.get("file_type")
+                logger.debug(f"Found file by backendFileId direct lookup: {backend_file_id} -> {file_path}, type: {stored_file_type}")
+            else:
+                # Fallback: search through uploaded_files for matching drive_id or id
+                for stored_file_id, stored_info in uploaded_files.items():
+                    if stored_info.get("drive_id") == backend_file_id or stored_info.get("id") == backend_file_id:
+                        file_path = stored_info.get("temp_path") or stored_info.get("path")
+                        stored_file_type = stored_info.get("file_type")
+                        logger.debug(f"Found file by backendFileId search: {backend_file_id} -> {file_path}")
+                        break
         
         # Also try matching by source/path
         if not file_path:
@@ -273,6 +282,7 @@ async def _validate_and_resolve_file_path(file_info: Dict[str, Any], file_id: st
                     stored_source = stored_info.get("source") or ""
                     if source in stored_path or source in stored_source or stored_path in source:
                         file_path = stored_path
+                        stored_file_type = stored_info.get("file_type")
                         logger.debug(f"Found file by source/path: {source} -> {file_path}")
                         break
     
@@ -366,34 +376,33 @@ async def _read_and_validate_file(file_path: str, file_id: str, job_id: str) -> 
             logger.warning(f"WebSocket broadcast failed: {e}")
         raise APIError(f'File read failed: {error_msg}', 500, "FILE_READ_ERROR")
 
-async def _check_infinite_recursion_risk(current_text: str, original_text: str, pass_num: int, file_id: str, job_id: str) -> bool:
-    """Check for infinite recursion risk and return True if should stop"""
-    if pass_num > 1:
-        # Check for exact duplicates before processing
-        if current_text == original_text and pass_num > 2:
-            logger.warning(f"Pass {pass_num} would process identical text, stopping to prevent infinite recursion")
-            warning_msg = {'type': 'warning', 'jobId': job_id, 'fileId': file_id, 'pass': pass_num, 'message': 'Identical text detected, stopping refinement'}
+async def _check_infinite_recursion_risk(current_text: str, original_text: str, pass_num: int, file_id: str, job_id: str, last_requested_pass: int = 10) -> bool:
+    """Check for infinite recursion risk and return True if should stop
+    
+    Args:
+        last_requested_pass: The last pass NUMBER in the requested range (NOT the count).
+                            e.g., if running passes 1-3, this should be 3.
+    
+    CRITICAL FIX: Only check for recursion risk AFTER the user's requested passes are complete.
+    If user asked for passes 1-5, let all 5 run regardless of similarity.
+    """
+    # NEVER stop early within the requested pass range
+    # User asked for passes up to last_requested_pass, so run them all
+    if pass_num <= last_requested_pass:
+        return False  # Always allow requested passes to run
+    
+    # Beyond requested passes - check for true infinite recursion
+    if pass_num > last_requested_pass:
+        # Check for exact duplicates - text hasn't changed at all
+        if current_text == original_text:
+            logger.warning(f"Pass {pass_num} (beyond requested pass {last_requested_pass}) would process original text, stopping")
+            warning_msg = {'type': 'warning', 'jobId': job_id, 'fileId': file_id, 'pass': pass_num, 'message': 'Text reverted to original, stopping refinement'}
             try:
                 await ws_manager.broadcast(job_id, warning_msg)  # type: ignore
             except Exception:
                 pass
             safe_jobs_snapshot_set(job_id, warning_msg)
             return True
-        
-        # Check for minimal changes in previous passes
-        if pass_num > 3:
-            # Calculate similarity with original text
-            import difflib
-            similarity = difflib.SequenceMatcher(None, original_text, current_text).ratio()
-            if similarity > 0.99:  # 99% similar
-                logger.warning(f"Pass {pass_num} shows minimal changes from original, stopping to prevent infinite recursion")
-                warning_msg = {'type': 'warning', 'jobId': job_id, 'fileId': file_id, 'pass': pass_num, 'message': f'Minimal changes detected ({similarity:.1%} similarity), stopping refinement'}
-                try:
-                    await ws_manager.broadcast(job_id, warning_msg)  # type: ignore
-                except Exception:
-                    pass
-                safe_jobs_snapshot_set(job_id, warning_msg)
-                return True
     
     return False
 
@@ -765,7 +774,9 @@ async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenera
                         output_sink = LocalSink(str(get_output_dir()))
                 
                 # Early infinite recursion detection - check before processing
-                if await _check_infinite_recursion_risk(current_text, original_text, pass_num, file_id, job_id):
+                # CRITICAL FIX: Pass the last requested pass NUMBER (not count) to allow all requested passes to run
+                last_pass_in_range = end_pass - 1  # e.g., if startPass=1, passes=3, last_pass=3
+                if await _check_infinite_recursion_risk(current_text, original_text, pass_num, file_id, job_id, last_pass_in_range):
                     break
 
                 try:
@@ -882,10 +893,14 @@ async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenera
                         logger.debug(f"Failed to emit strategy event: {e}")
                     
                     # Validate that the pass actually produced meaningful changes to prevent infinite recursion
-                    if pass_num > 1:
-                        # Check for exact duplicates
+                    # CRITICAL FIX: Only check for EXACT duplicates on passes AFTER the requested range
+                    # Allow all requested passes to run - user asked for passes up to end_pass-1
+                    # Only stop early if text is EXACTLY the same (no changes at all)
+                    last_requested_pass = end_pass - 1  # e.g., if startPass=1, passes=3, end_pass=4, last_requested=3
+                    if pass_num > last_requested_pass:
+                        # Beyond requested passes - check for exact duplicates only
                         if refined_text == current_text:
-                            logger.warning(f"Pass {pass_num} produced identical text, stopping to prevent infinite recursion")
+                            logger.warning(f"Pass {pass_num} produced identical text (beyond requested pass {last_requested_pass}), stopping")
                             warning_msg = {'type': 'warning', 'jobId': job_id, 'fileId': file_id, 'fileName': file_name, 'pass': pass_num, 'message': 'Pass produced identical text, stopping refinement'}
                             try:
                                 await ws_manager.broadcast(job_id, warning_msg)  # type: ignore
@@ -894,36 +909,18 @@ async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenera
                             jobs_snapshot[job_id] = warning_msg
                             yield f"{safe_encoder(warning_msg)}\n\n"
                             break  # Stop processing this file
-                        
-                        # Check for minimal changes (less than 0.1% difference)
-                        import difflib
-                        similarity = difflib.SequenceMatcher(None, current_text, ft).ratio()
-                        if similarity > 0.999:  # 99.9% similar
-                            logger.warning(f"Pass {pass_num} produced minimal changes ({similarity:.3f} similarity), stopping to prevent infinite recursion")
-                            warning_msg = {'type': 'warning', 'jobId': job_id, 'fileId': file_id, 'fileName': file_name, 'pass': pass_num, 'message': f'Pass produced minimal changes ({similarity:.1%} similarity), stopping refinement'}
+                    elif pass_num > 1:
+                        # Within requested passes - only warn but DON'T stop
+                        # User explicitly requested these passes, so run them all
+                        if refined_text == current_text:
+                            logger.info(f"Pass {pass_num} produced identical text, but continuing as user requested passes up to {last_requested_pass}")
+                            info_msg = {'type': 'info', 'jobId': job_id, 'fileId': file_id, 'fileName': file_name, 'pass': pass_num, 'message': f'Pass {pass_num} text unchanged, continuing to next pass'}
                             try:
-                                await ws_manager.broadcast(job_id, warning_msg)  # type: ignore
+                                await ws_manager.broadcast(job_id, info_msg)  # type: ignore
                             except Exception:
                                 pass
-                            jobs_snapshot[job_id] = warning_msg
-                            yield f"{safe_encoder(warning_msg)}\n\n"
-                            break  # Stop processing this file
-                        
-                        # Check for diminishing returns (changes getting smaller)
-                        if pass_num > 2:
-                            prev_length = len(current_text)
-                            current_length = len(ft)
-                            change_ratio = abs(current_length - prev_length) / max(prev_length, 1)
-                            if change_ratio < 0.001:  # Less than 0.1% change
-                                logger.warning(f"Pass {pass_num} shows diminishing returns ({change_ratio:.4f} change ratio), stopping refinement")
-                                warning_msg = {'type': 'warning', 'jobId': job_id, 'fileId': file_id, 'fileName': file_name, 'pass': pass_num, 'message': f'Diminishing returns detected ({change_ratio:.2%} change), stopping refinement'}
-                                try:
-                                    await ws_manager.broadcast(job_id, warning_msg)  # type: ignore
-                                except Exception:
-                                    pass
-                                jobs_snapshot[job_id] = warning_msg
-                                yield f"{safe_encoder(warning_msg)}\n\n"
-                                break  # Stop processing this file
+                            yield f"{safe_encoder(info_msg)}\n\n"
+                            # Don't break - continue to next pass as requested
                     
                     for stage_name, stage_state in ps.stages.items():
                         st_evt = {'type': 'stage_update', 'jobId': job_id, 'fileId': file_id, 'fileName': file_name, 'pass': pass_num, 'stage': stage_name, 'status': stage_state.status, 'duration': stage_state.duration_ms}
