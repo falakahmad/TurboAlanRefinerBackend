@@ -477,6 +477,28 @@ async def _validate_and_resolve_file_path(file_info: Dict[str, Any], file_id: st
                    file_info.get("temp_path") or 
                    file_info.get("source") or "")
     
+    # CRITICAL FIX: Handle temp file paths on Vercel/serverless
+    # Temp files may not persist, so we need to check if the path exists
+    # If it's a /tmp path and doesn't exist, it means the file was uploaded in a different invocation
+    if file_path and file_path.startswith('/tmp/'):
+        if not os.path.exists(file_path):
+            # Temp file doesn't exist - this is likely a serverless issue
+            # Try to find the file by searching uploaded_files more thoroughly
+            logger.warning(f"Temp file {file_path} doesn't exist, searching uploaded_files registry...")
+            
+            # Search by filename if available
+            file_name = file_info.get("name", "")
+            if file_name:
+                for stored_file_id, stored_info in uploaded_files.items():
+                    stored_name = stored_info.get("filename") or stored_info.get("name", "")
+                    if stored_name == file_name or file_name in stored_name:
+                        file_path = stored_info.get("temp_path") or stored_info.get("path")
+                        stored_file_type = stored_info.get("file_type")
+                        if file_path and os.path.exists(file_path):
+                            logger.info(f"Found file by name match: {file_name} -> {file_path}")
+                            break
+                        file_path = None  # Reset if found but doesn't exist
+    
     # If still no path, try to construct from filename with strict security validation
     if not file_path and file_info.get("name"):
         filename = file_info.get("name")
@@ -500,8 +522,23 @@ async def _validate_and_resolve_file_path(file_info: Dict[str, Any], file_id: st
                     # Path resolution failed or is invalid
                     pass
     
-    if not file_path or not os.path.exists(file_path):
-        raise APIError(f'File not found: {file_path or "no path provided"}', 404, "FILE_NOT_FOUND")
+    # Final validation with better error message
+    if not file_path:
+        # Provide helpful error message
+        file_id_str = file_id if file_id != "selected_file" else "the selected file"
+        raise APIError(
+            f'File not found: {file_id_str}. The file may have expired or was not properly uploaded. Please re-upload the file.',
+            404,
+            "FILE_NOT_FOUND"
+        )
+    
+    if not os.path.exists(file_path):
+        # File path exists but file doesn't - likely a serverless/temp file issue
+        raise APIError(
+            f'File path exists but file not found: {file_path}. This may be a temporary file that expired. Please re-upload the file.',
+            404,
+            "FILE_EXPIRED"
+        )
     
     return file_path
 
@@ -1444,6 +1481,34 @@ async def refine_run(request: RefinementRequest):
     logger.debug(f"REFINE_RUN: Received request with {len(request.files)} files")
     if not request.files:
         return JSONResponse({"error": "No files provided"}, status_code=400)
+    
+    # Validate that files can be resolved before starting
+    for file_info in request.files:
+        file_id = file_info.get("id", "unknown")
+        try:
+            # Try to resolve the file path early to catch issues
+            file_path = await _validate_and_resolve_file_path(file_info, file_id)
+            if not file_path or not os.path.exists(file_path):
+                logger.error(f"REFINE_RUN: File validation failed for {file_id}: path={file_path}")
+                return JSONResponse({
+                    "error": f"File not found: {file_id}. Please re-upload the file.",
+                    "file_id": file_id,
+                    "details": "The file may have expired or was not properly uploaded."
+                }, status_code=400)
+        except APIError as e:
+            logger.error(f"REFINE_RUN: File validation error for {file_id}: {e.message}")
+            return JSONResponse({
+                "error": e.message,
+                "error_code": e.error_code,
+                "file_id": file_id
+            }, status_code=e.status_code)
+        except Exception as e:
+            logger.error(f"REFINE_RUN: Unexpected error validating file {file_id}: {str(e)}", exc_info=True)
+            return JSONResponse({
+                "error": f"Failed to validate file {file_id}: {str(e)}",
+                "file_id": file_id
+            }, status_code=400)
+    
     logger.debug("REFINE_RUN: Checking pipeline...")
     try:
         if not get_pipeline():
