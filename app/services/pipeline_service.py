@@ -367,8 +367,13 @@ class RefinementPipeline:
         heuristics_overrides: dict | None = None,
         job_id: str | None = None,
         user_id: str | None = None,
+        total_passes: int = 1,  # Total passes for model tiering
     ) -> Tuple[PassState, RunResult, str]:
-        print(f"PIPELINE: run_pass started for pass {pass_index}")
+        print(f"PIPELINE: run_pass started for pass {pass_index} of {total_passes}")
+        
+        # Store pass info for model tiering
+        self._current_pass_index = pass_index
+        self._current_total_passes = total_passes
         
         # Track schema usage for analytics
         try:
@@ -2109,14 +2114,16 @@ class RefinementPipeline:
                             except Exception:
                                 adaptive_max_tokens = 2000  # Fallback to default
                             
-                            # Generate text
+                            # Generate text with model tiering (cheaper model for early passes)
                             gen_txt, cost_info = self.model.generate(
                                 system=sys_full, 
                                 user=payload, 
                                 temperature=temp, 
                                 max_tokens=adaptive_max_tokens, 
                                 job_id=self._current_job_id, 
-                                user_id=getattr(self, '_current_user_id', None)
+                                user_id=getattr(self, '_current_user_id', None),
+                                pass_num=getattr(self, '_current_pass_index', 1),
+                                total_passes=getattr(self, '_current_total_passes', 1)
                             )
                             
                             # Restore placeholders if needed
@@ -2236,7 +2243,12 @@ class RefinementPipeline:
                             adaptive_max_tokens = min(4000, max(1000, int(input_tokens * 0.5)))
                         except Exception:
                             adaptive_max_tokens = 2000  # Fallback to default
-                        gen_txt, cost_info = self.model.generate(system=sys_full, user=payload, temperature=temp, max_tokens=adaptive_max_tokens, job_id=self._current_job_id, user_id=getattr(self, '_current_user_id', None))
+                        gen_txt, cost_info = self.model.generate(
+                            system=sys_full, user=payload, temperature=temp, max_tokens=adaptive_max_tokens, 
+                            job_id=self._current_job_id, user_id=getattr(self, '_current_user_id', None),
+                            pass_num=getattr(self, '_current_pass_index', 1),
+                            total_passes=getattr(self, '_current_total_passes', 1)
+                        )
                         if not hasattr(self, '_pass_costs'):
                             self._pass_costs = []
                         self._pass_costs.append(cost_info)
@@ -2254,7 +2266,12 @@ class RefinementPipeline:
                             adaptive_max_tokens = min(4000, max(1000, int(input_tokens * 0.5)))
                         except Exception:
                             adaptive_max_tokens = 2000  # Fallback to default
-                        result = self.model.generate(system=sys_full, user=payload, temperature=temp, max_tokens=adaptive_max_tokens, user_id=getattr(self, '_current_user_id', None))
+                        result = self.model.generate(
+                            system=sys_full, user=payload, temperature=temp, max_tokens=adaptive_max_tokens, 
+                            user_id=getattr(self, '_current_user_id', None),
+                            pass_num=getattr(self, '_current_pass_index', 1),
+                            total_passes=getattr(self, '_current_total_passes', 1)
+                        )
                         if isinstance(result, tuple):
                             gen_txt, cost_info = result
                             # Still track costs even without job_id
