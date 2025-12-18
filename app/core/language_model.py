@@ -7,11 +7,14 @@ import os
 import json
 import logging
 from collections import deque, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 try:  # optional dependency for token budgeting
     import tiktoken
 except Exception:  # pragma: no cover
     tiktoken = None
+
+# Module-level logger
+logger = logging.getLogger(__name__)
 
 # OpenAI Pricing (as of 2024)
 OPENAI_PRICING = {
@@ -36,6 +39,21 @@ OPENAI_PRICING = {
         'output': 0.0015  # $0.0015 per 1K tokens
     }
 }
+
+# Cost limits (hard-coded defaults so no env configuration is required)
+# You can change these values directly in code if needed.
+MAX_COST_PER_JOB: float = 5.0            # Max $ per job
+MAX_COST_PER_USER_DAILY: float = 50.0    # Max $ per user per day
+MAX_TOKENS_PER_JOB: int = 500_000        # Max tokens per job
+
+class CostLimitExceeded(Exception):
+    """Raised when a job or user exceeds their cost limit."""
+    def __init__(self, message: str, current_cost: float, limit: float, limit_type: str = "job"):
+        self.message = message
+        self.current_cost = current_cost
+        self.limit = limit
+        self.limit_type = limit_type
+        super().__init__(message)
 
 def calculate_cost(tokens_in: int, tokens_out: int, model: str = "gpt-4") -> dict:
     """Calculate cost for given token usage and model"""
@@ -67,6 +85,9 @@ class _Analytics:
         # Job-level cost tracking
         self.job_costs: Dict[str, float] = {}  # job_id -> total_cost
         self.pass_costs: Dict[str, List[float]] = {}  # job_id -> [pass1_cost, pass2_cost, ...]
+        self.job_tokens: Dict[str, int] = {}  # job_id -> total tokens used
+        # User-level daily cost tracking
+        self.user_daily_costs: Dict[str, Dict[str, float]] = {}  # user_id -> {date: cost}
         # Schema usage tracking
         self.schema_usage: Dict[str, int] = {}  # schema_id -> usage_count
         self.schema_last_used: Dict[str, str] = {}  # schema_id -> last_used_timestamp
@@ -150,13 +171,19 @@ class _Analytics:
         cost_info = calculate_cost(in_tokens, out_tokens, model)
         self.total_cost += cost_info['total_cost']
         
-        # Track job-level costs
+        # Track job-level costs and tokens
         if job_id:
             if job_id not in self.job_costs:
                 self.job_costs[job_id] = 0.0
                 self.pass_costs[job_id] = []
+                self.job_tokens[job_id] = 0
             self.job_costs[job_id] += cost_info['total_cost']
             self.pass_costs[job_id].append(cost_info['total_cost'])
+            self.job_tokens[job_id] += max(0, in_tokens) + max(0, out_tokens)
+        
+        # Track user daily costs
+        if user_id:
+            self.update_user_daily_cost(user_id, cost_info['total_cost'])
         
         self.events.append((now, in_tokens, out_tokens, model, cost_info['total_cost']))
         
@@ -198,6 +225,94 @@ class _Analytics:
             logger.warning(f"Failed to persist analytics: {e}", exc_info=True)
         
         return cost_info
+
+    def check_job_cost_limit(self, job_id: str, estimated_cost: float = 0.0) -> None:
+        """Check if adding estimated_cost would exceed job cost limit.
+        Raises CostLimitExceeded if limit would be exceeded.
+        """
+        if not job_id:
+            return
+        
+        current_cost = self.job_costs.get(job_id, 0.0)
+        projected_cost = current_cost + estimated_cost
+        
+        if projected_cost > MAX_COST_PER_JOB:
+            raise CostLimitExceeded(
+                f"Job cost limit exceeded: ${projected_cost:.4f} > ${MAX_COST_PER_JOB:.2f}",
+                current_cost=current_cost,
+                limit=MAX_COST_PER_JOB,
+                limit_type="job"
+            )
+        
+        # Also check token limit
+        current_tokens = self.job_tokens.get(job_id, 0)
+        if current_tokens > MAX_TOKENS_PER_JOB:
+            raise CostLimitExceeded(
+                f"Job token limit exceeded: {current_tokens:,} > {MAX_TOKENS_PER_JOB:,}",
+                current_cost=current_cost,
+                limit=MAX_TOKENS_PER_JOB,
+                limit_type="tokens"
+            )
+
+    def check_user_daily_limit(self, user_id: str, estimated_cost: float = 0.0) -> None:
+        """Check if user's daily spending would exceed limit.
+        Raises CostLimitExceeded if limit would be exceeded.
+        """
+        if not user_id:
+            return
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        user_costs = self.user_daily_costs.get(user_id, {})
+        current_daily_cost = user_costs.get(today, 0.0)
+        projected_cost = current_daily_cost + estimated_cost
+        
+        if projected_cost > MAX_COST_PER_USER_DAILY:
+            raise CostLimitExceeded(
+                f"Daily user cost limit exceeded: ${projected_cost:.4f} > ${MAX_COST_PER_USER_DAILY:.2f}",
+                current_cost=current_daily_cost,
+                limit=MAX_COST_PER_USER_DAILY,
+                limit_type="user_daily"
+            )
+
+    def update_user_daily_cost(self, user_id: str, cost: float) -> None:
+        """Update user's daily cost tracking."""
+        if not user_id:
+            return
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        if user_id not in self.user_daily_costs:
+            self.user_daily_costs[user_id] = {}
+        
+        current = self.user_daily_costs[user_id].get(today, 0.0)
+        self.user_daily_costs[user_id][today] = current + cost
+        
+        # Cleanup old dates (keep only last 7 days)
+        cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        self.user_daily_costs[user_id] = {
+            k: v for k, v in self.user_daily_costs[user_id].items()
+            if k >= cutoff
+        }
+
+    def update_job_tokens(self, job_id: str, tokens: int) -> None:
+        """Update job token count."""
+        if not job_id:
+            return
+        current = self.job_tokens.get(job_id, 0)
+        self.job_tokens[job_id] = current + tokens
+
+    def get_job_stats(self, job_id: str) -> Dict[str, Any]:
+        """Get comprehensive stats for a job."""
+        return {
+            "job_id": job_id,
+            "total_cost": self.job_costs.get(job_id, 0.0),
+            "total_tokens": self.job_tokens.get(job_id, 0),
+            "pass_costs": self.pass_costs.get(job_id, []),
+            "pass_count": len(self.pass_costs.get(job_id, [])),
+            "cost_limit": MAX_COST_PER_JOB,
+            "token_limit": MAX_TOKENS_PER_JOB,
+            "cost_remaining": MAX_COST_PER_JOB - self.job_costs.get(job_id, 0.0),
+            "tokens_remaining": MAX_TOKENS_PER_JOB - self.job_tokens.get(job_id, 0)
+        }
 
     def summary_last_24h(self) -> Dict[str, Any]:
         now = int(time.time())
@@ -293,8 +408,37 @@ class OpenAIModel:
         # Track request timeout (configurable via env)
         self._request_timeout = int(os.getenv("OPENAI_REQUEST_TIMEOUT", "120"))  # 2 min default
 
-    def generate(self, system: str, user: str, temperature: float = 0.4, max_tokens: int = 2000, job_id: str = None, user_id: str = None, fast_mode: bool = False) -> tuple[str, dict]:
+    def generate(self, system: str, user: str, temperature: float = 0.4, max_tokens: int = 2000, job_id: str = None, user_id: str = None, fast_mode: bool = False, pass_num: int = 1, total_passes: int = 1) -> tuple[str, dict]:
+        """Generate text using OpenAI API with cost controls and model tiering.
+        
+        Args:
+            system: System prompt
+            user: User prompt/content
+            temperature: Sampling temperature
+            max_tokens: Maximum output tokens
+            job_id: Job ID for tracking
+            user_id: User ID for tracking
+            fast_mode: Use cheaper model (gpt-4o-mini)
+            pass_num: Current pass number (1-indexed)
+            total_passes: Total number of passes requested
+            
+        Returns:
+            Tuple of (generated_text, cost_info)
+        """
         t0 = time.perf_counter()
+        
+        # Check cost limits before proceeding
+        try:
+            # Estimate cost for this request (rough estimate: input tokens * 2 for output)
+            estimated_tokens = (len(system) + len(user)) // 4  # Rough char-to-token ratio
+            estimated_cost = (estimated_tokens / 1000) * 0.005  # Conservative estimate
+            
+            analytics_store.check_job_cost_limit(job_id, estimated_cost)
+            analytics_store.check_user_daily_limit(user_id, estimated_cost)
+        except CostLimitExceeded as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Cost limit exceeded: {e.message}")
+            raise  # Re-raise to be handled by caller
         
         def _estimate_max_chars_for_model(model: str, max_input_tokens: int = 7000) -> int:
             # Heuristic: ~4 chars/token. Leave room for system + output tokens.
@@ -319,15 +463,29 @@ class OpenAIModel:
                 enc = tiktoken.encoding_for_model(self.model)
             except Exception:
                 enc = tiktoken.get_encoding("cl100k_base")
-            pre_tokens = len(enc.encode(system)) + len(enc.encode(attempted_user if 'attempted_user' in locals() else attempt_user))
+            pre_tokens = len(enc.encode(system)) + len(enc.encode(attempt_user))
             if pre_tokens > max_in:
                 raise ValueError(f"TOKEN_BEDGET_EXCEEDED: {pre_tokens}>{max_in}")
 
-        # Use model override for fast mode (cheaper, faster model)
+        # MODEL TIERING: Use cheaper model for early passes, premium for final.
+        # These are hard-coded defaults so you don't need environment variables.
         use_model = self.model
-        if fast_mode:
-            # Use gpt-4o-mini for faster/cheaper processing in fast mode
-            use_model = os.getenv("OPENAI_FAST_MODEL", "gpt-4o-mini")
+        model_tier_enabled = True  # Always enable tiering by default
+
+        EARLY_PASS_MODEL = "gpt-4o-mini"   # Model for non-final passes
+        FINAL_PASS_MODEL = "gpt-4o"        # Model for final pass
+        FAST_MODE_MODEL = "gpt-4o-mini"    # Model for explicit fast mode
+        
+        if model_tier_enabled and total_passes > 1:
+            # Early passes (all except final): use fast/cheap model
+            if pass_num < total_passes:
+                use_model = EARLY_PASS_MODEL
+            else:
+                # Final pass: use premium model for polish
+                use_model = FINAL_PASS_MODEL
+        elif fast_mode:
+            # Explicit fast mode override
+            use_model = FAST_MODE_MODEL
         
         try:
             resp = self.client.chat.completions.create(
