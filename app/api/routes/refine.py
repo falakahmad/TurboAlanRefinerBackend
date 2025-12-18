@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 import time
+from datetime import datetime
 from typing import AsyncGenerator, Dict, Any, List, Optional
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -30,12 +31,195 @@ from app.core.database import upsert_job
 from app.core.dependencies import get_pipeline
 from app.core.errors import APIError
 from app.core.prompt_schema import ADVANCED_COMMANDS
+from app.core.language_model import CostLimitExceeded, analytics_store
 
 router = APIRouter()
 logger = get_logger('api.refine')
 
 MAX_REFINEMENT_PASSES = 10
 MAX_HEURISTICS_SIZE = 1024 * 1024
+
+# =====================================================
+# PRESET PROFILES
+# =====================================================
+# Pre-configured refinement profiles for common use cases
+
+PRESET_PROFILES = {
+    "fast_cheap": {
+        "name": "Fast & Cheap",
+        "description": "Quick refinement using the cheapest model. Best for drafts or low-priority work.",
+        "passes": 1,
+        "entropy_level": "low",
+        "model": "gpt-4o-mini",
+        "aggressiveness": 3,
+        "use_model_tiering": False,  # Always use cheap model
+        "estimated_cost_per_1k_tokens": 0.00015,
+        "heuristics": {
+            "simplifyJargon": False,
+            "condenseRedundant": True,
+            "preserveFormatting": True,
+            "toneFormality": 5
+        }
+    },
+    "balanced": {
+        "name": "Balanced",
+        "description": "Good balance of quality and cost. Uses cheap model for initial passes, premium for final.",
+        "passes": 2,
+        "entropy_level": "medium",
+        "model": "gpt-4o",
+        "aggressiveness": 5,
+        "use_model_tiering": True,  # Cheap for pass 1, premium for pass 2
+        "estimated_cost_per_1k_tokens": 0.003,
+        "heuristics": {
+            "simplifyJargon": True,
+            "condenseRedundant": True,
+            "preserveFormatting": True,
+            "toneFormality": 5
+        }
+    },
+    "max_quality": {
+        "name": "Max Quality",
+        "description": "Best quality refinement. Uses premium model for all passes with thorough processing.",
+        "passes": 3,
+        "entropy_level": "high",
+        "model": "gpt-4o",
+        "aggressiveness": 7,
+        "use_model_tiering": False,  # Premium model for all passes
+        "estimated_cost_per_1k_tokens": 0.0025,
+        "heuristics": {
+            "simplifyJargon": True,
+            "condenseRedundant": True,
+            "preserveFormatting": True,
+            "toneFormality": 7,
+            "enhanceClarity": True,
+            "improveFlow": True
+        }
+    },
+    "academic": {
+        "name": "Academic",
+        "description": "Optimized for academic and research documents. Preserves citations and technical accuracy.",
+        "passes": 2,
+        "entropy_level": "low",
+        "model": "gpt-4o",
+        "aggressiveness": 4,
+        "use_model_tiering": True,
+        "estimated_cost_per_1k_tokens": 0.002,
+        "heuristics": {
+            "simplifyJargon": False,
+            "condenseRedundant": True,
+            "preserveFormatting": True,
+            "preserveCitations": True,
+            "toneFormality": 8
+        }
+    },
+    "creative": {
+        "name": "Creative",
+        "description": "For creative writing. Maintains voice while improving flow and readability.",
+        "passes": 2,
+        "entropy_level": "high",
+        "model": "gpt-4o",
+        "aggressiveness": 4,
+        "use_model_tiering": True,
+        "estimated_cost_per_1k_tokens": 0.002,
+        "heuristics": {
+            "simplifyJargon": False,
+            "condenseRedundant": False,
+            "preserveFormatting": True,
+            "preserveVoice": True,
+            "toneFormality": 3
+        }
+    }
+}
+
+
+def apply_preset_to_request(request: "RefinementRequest", preset_name: str) -> "RefinementRequest":
+    """Apply a preset profile to a refinement request."""
+    if preset_name not in PRESET_PROFILES:
+        return request
+    
+    preset = PRESET_PROFILES[preset_name]
+    
+    # Only override values that weren't explicitly set
+    if request.passes == 1:  # Default value
+        request.passes = preset.get("passes", 1)
+    if request.entropy_level == "medium":  # Default value
+        request.entropy_level = preset.get("entropy_level", "medium")
+    if request.aggressiveness == 5:  # Default value
+        request.aggressiveness = preset.get("aggressiveness", 5)
+    
+    # Merge heuristics (preset values as defaults, request values override)
+    preset_heuristics = preset.get("heuristics", {})
+    if request.heuristics:
+        merged = {**preset_heuristics, **request.heuristics}
+        request.heuristics = merged
+    else:
+        request.heuristics = preset_heuristics
+    
+    return request
+
+
+# Error classification for better error handling and retry logic
+class ErrorType:
+    """Classification of errors for smarter handling."""
+    TRANSIENT = "transient"  # Can be retried (timeouts, 5xx, rate limits)
+    PERMANENT = "permanent"  # Cannot be retried (auth, config, context limit)
+    COST_LIMIT = "cost_limit"  # Cost/token budget exceeded
+    UNKNOWN = "unknown"
+
+def classify_error(error: Exception) -> tuple[str, str, bool]:
+    """
+    Classify an error as transient or permanent.
+    
+    Returns:
+        tuple: (error_type, user_friendly_message, should_retry)
+    """
+    error_str = str(error).lower()
+    error_class = type(error).__name__
+    
+    # Transient errors (can retry)
+    transient_patterns = [
+        ("timeout", "The request timed out. Try again or reduce document size."),
+        ("rate_limit", "Rate limit reached. Please wait a moment and try again."),
+        ("429", "Too many requests. Please wait a moment."),
+        ("503", "Service temporarily unavailable. Try again shortly."),
+        ("502", "Server temporarily unavailable. Try again."),
+        ("500", "Server error. Try again in a moment."),
+        ("connection", "Connection error. Check your internet and try again."),
+        ("network", "Network error. Check your connection."),
+        ("econnreset", "Connection was reset. Try again."),
+        ("econnrefused", "Connection refused. Try again later."),
+    ]
+    
+    # Permanent errors (do not retry)
+    permanent_patterns = [
+        ("invalid_api_key", "Invalid API key. Please check your configuration."),
+        ("authentication", "Authentication failed. Check your API key."),
+        ("unauthorized", "Unauthorized. Please check your credentials."),
+        ("401", "Authentication required. Check API key."),
+        ("403", "Access forbidden. Check your permissions."),
+        ("context_length", "Document too large for model. Try splitting into smaller sections."),
+        ("maximum_context_length", "Document exceeds context limit. Reduce document size."),
+        ("max_tokens", "Token limit exceeded. Try with fewer passes or smaller document."),
+        ("invalid_request", "Invalid request format. Please check your input."),
+        ("content_policy", "Content violates policy. Review and modify content."),
+        ("model_not_found", "Model not available. Check model configuration."),
+        ("billing", "Billing issue. Check your OpenAI account."),
+        ("quota", "Quota exceeded. Check your OpenAI billing."),
+        ("insufficient_quota", "Insufficient quota. Add billing to OpenAI account."),
+    ]
+    
+    # Check transient patterns
+    for pattern, message in transient_patterns:
+        if pattern in error_str or pattern in error_class.lower():
+            return ErrorType.TRANSIENT, message, True
+    
+    # Check permanent patterns
+    for pattern, message in permanent_patterns:
+        if pattern in error_str:
+            return ErrorType.PERMANENT, message, False
+    
+    # Default to transient for unknown errors (safer to allow retry)
+    return ErrorType.UNKNOWN, f"Unexpected error: {str(error)[:100]}", True
 
 # CRITICAL FIX: Dedicated thread pool for pipeline execution
 # This prevents blocking the main event loop and allows better resource management
@@ -52,7 +236,7 @@ class RefinementRequest(BaseModel):
     settings: Dict[str, Any] = {}
     user_id: str = "default"
     use_memory: bool = True
-    aggressiveness: str = "Auto"
+    aggressiveness: int = 5  # Changed to int for preset compatibility
     earlyStop: bool = True
     scannerRisk: int = 15
     keywords: List[str] = []
@@ -63,6 +247,7 @@ class RefinementRequest(BaseModel):
     history_analysis: Dict[str, Any] = {}
     refiner_dry_run: bool = False
     annotation_mode: Dict[str, Any] = {}
+    preset: str = None  # Preset profile name (fast_cheap, balanced, max_quality, academic, creative)
     
     def __init__(self, **data):
         super().__init__(**data)
@@ -472,6 +657,10 @@ async def _process_refinement_pass(
         # CRITICAL FIX: Use dedicated thread pool for better resource management
         logger.debug(f"About to call pipeline.run_pass for pass {pass_num}")
         loop = asyncio.get_running_loop()
+        # Calculate end pass for total_passes (for model tiering)
+        end_pass = request.startPass + request.passes
+        total_passes = end_pass - request.startPass  # Actual number of passes to run
+        
         ps, rr, ft = await loop.run_in_executor(
             _pipeline_executor,  # Use dedicated pipeline thread pool
             lambda: pipeline.run_pass(
@@ -482,7 +671,8 @@ async def _process_refinement_pass(
                 output_sink=output_sink,
                 drive_title_base=Path(file_path).stem,
                 heuristics_overrides=request.heuristics,
-                job_id=job_id
+                job_id=job_id,
+                total_passes=total_passes  # For model tiering (cheaper model on early passes)
             )
         )
         logger.debug(f"pipeline.run_pass completed for pass {pass_num}")
@@ -598,25 +788,81 @@ async def _process_refinement_pass(
         
         return True, ft, metrics, ps, rr
         
+    except CostLimitExceeded as e:
+        # COST LIMIT EXCEEDED - surface this clearly to the user
+        error_msg = f"Cost limit exceeded: {e.message}"
+        err_evt = {
+            'type': 'error', 
+            'jobId': job_id, 
+            'fileId': file_id, 
+            'pass': pass_num, 
+            'error': error_msg,
+            'errorType': 'cost_limit',
+            'currentCost': e.current_cost,
+            'limit': e.limit,
+            'limitType': e.limit_type
+        }
+        try:
+            await ws_manager.broadcast(job_id, err_evt)  # type: ignore
+        except Exception:
+            pass
+        safe_jobs_snapshot_set(job_id, err_evt)
+        try:
+            upsert_job(job_id, {"current_stage": "cost_limit", "status": "failed", "error": error_msg})
+        except Exception:
+            pass
+        logger.warning(f"Cost limit exceeded for job {job_id}: {e.message}")
+        return False, current_text, {'error': error_msg, 'errorType': 'cost_limit'}, None, None
+        
     except Exception as e:
+        # Classify the error for smarter handling
+        error_type, user_message, can_retry = classify_error(e)
         error_msg = str(e).replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+        
         # Include the actual error message in the event so users can see what went wrong
-        err2 = {'type': 'error', 'jobId': job_id, 'fileId': file_id, 'pass': pass_num, 'error': f'Pass {pass_num} failed: {error_msg}'}
+        err_evt = {
+            'type': 'error', 
+            'jobId': job_id, 
+            'fileId': file_id, 
+            'pass': pass_num, 
+            'error': f'Pass {pass_num} failed: {user_message}',
+            'errorType': error_type,
+            'canRetry': can_retry,
+            'technicalDetails': error_msg[:200] if len(error_msg) > 200 else error_msg
+        }
         try:
-            await ws_manager.broadcast(job_id, err2)  # type: ignore
+            await ws_manager.broadcast(job_id, err_evt)  # type: ignore
         except Exception:
             pass
-        safe_jobs_snapshot_set(job_id, err2)
+        safe_jobs_snapshot_set(job_id, err_evt)
+        
+        # Different status based on error type
+        status = "failed" if error_type == ErrorType.PERMANENT else "error_recoverable"
         try:
-            upsert_job(job_id, {"current_stage": "error", "status": "failed", "error": err2.get("error")})
+            upsert_job(job_id, {"current_stage": "error", "status": status, "error": err_evt.get("error")})
         except Exception:
             pass
-        logger.error(f"Pass {pass_num} failed: {e}", exc_info=True)  # Include stack trace
+            
+        if error_type == ErrorType.PERMANENT:
+            logger.error(f"Permanent error on pass {pass_num}: {e}", exc_info=True)
+        else:
+            logger.warning(f"Transient error on pass {pass_num} (retryable): {e}")
+            
         # Return the error message so the caller can use it
-        return False, current_text, {'error': error_msg}, None, None
+        return False, current_text, {
+            'error': error_msg, 
+            'errorType': error_type, 
+            'userMessage': user_message,
+            'canRetry': can_retry
+        }, None, None
 
 async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenerator[str, None]:
     logger.debug(f"Starting refinement stream for job {job_id}")
+    
+    # Apply preset profile if specified
+    if request.preset:
+        request = apply_preset_to_request(request, request.preset)
+        logger.info(f"Applied preset '{request.preset}' to job {job_id}")
     
     # Create job in MongoDB
     try:
@@ -1326,3 +1572,186 @@ async def refine_run(request: RefinementRequest):
     )
 
 
+# =====================================================
+# JOB ANALYTICS ENDPOINT
+# =====================================================
+
+@router.get("/job/{job_id}/analytics")
+async def get_job_analytics(job_id: str):
+    """
+    Get detailed analytics for a specific job.
+    
+    Returns:
+        - Total tokens in/out per pass
+        - Cost estimate per pass and total
+        - Chunk counts and failure rate
+        - Time per stage (read/prep/refine/post/write)
+        - Warnings and errors
+    """
+    try:
+        # Get job stats from analytics store
+        job_stats = analytics_store.get_job_stats(job_id)
+        
+        # Get additional info from job snapshot
+        job_info = jobs_snapshot.get(job_id, {})
+        
+        # Get pipeline stats if available
+        pipeline = get_pipeline()
+        pipeline_stats = {}
+        if pipeline:
+            # Get chunk stats if tracked
+            if hasattr(pipeline, '_current_chunk_progress'):
+                pipeline_stats['chunkProgress'] = pipeline._current_chunk_progress.get(job_id, 0)
+            if hasattr(pipeline, '_current_chunk_total'):
+                pipeline_stats['chunkTotal'] = pipeline._current_chunk_total.get(job_id, 0)
+            if hasattr(pipeline, '_current_chunk_failures'):
+                pipeline_stats['chunkFailures'] = pipeline._current_chunk_failures.get(job_id, 0)
+        
+        # Calculate failure rate
+        failure_rate = 0.0
+        if pipeline_stats.get('chunkTotal', 0) > 0:
+            failure_rate = pipeline_stats.get('chunkFailures', 0) / pipeline_stats['chunkTotal']
+        
+        response = {
+            "jobId": job_id,
+            "cost": {
+                "total": job_stats.get("total_cost", 0.0),
+                "perPass": job_stats.get("pass_costs", []),
+                "remaining": job_stats.get("cost_remaining", 0.0),
+                "limit": job_stats.get("cost_limit", 5.0)
+            },
+            "tokens": {
+                "total": job_stats.get("total_tokens", 0),
+                "remaining": job_stats.get("tokens_remaining", 0),
+                "limit": job_stats.get("token_limit", 500000)
+            },
+            "chunks": {
+                "processed": pipeline_stats.get('chunkProgress', 0),
+                "total": pipeline_stats.get('chunkTotal', 0),
+                "failures": pipeline_stats.get('chunkFailures', 0),
+                "failureRate": failure_rate
+            },
+            "passes": {
+                "completed": job_stats.get("pass_count", 0),
+            },
+            "status": job_info.get("type", "unknown"),
+            "warnings": []
+        }
+        
+        # Add warnings based on metrics
+        if failure_rate > 0.2:
+            response["warnings"].append(f"{int(failure_rate * 100)}% of chunks used fallback text")
+        if job_stats.get("cost_remaining", 0) < 1.0:
+            response["warnings"].append("Low cost budget remaining")
+        if job_stats.get("tokens_remaining", 0) < 50000:
+            response["warnings"].append("Low token budget remaining")
+        
+        return JSONResponse(content=response)
+        
+    except Exception as e:
+        logger.error(f"Failed to get job analytics: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to get analytics: {str(e)}"}
+        )
+
+
+@router.get("/presets")
+async def get_presets():
+    """Get available refinement preset profiles."""
+    return JSONResponse(content={
+        "presets": {
+            name: {
+                "name": profile["name"],
+                "description": profile["description"],
+                "passes": profile["passes"],
+                "entropyLevel": profile["entropy_level"],
+                "estimatedCostPer1kTokens": profile["estimated_cost_per_1k_tokens"],
+                "useModelTiering": profile["use_model_tiering"]
+            }
+            for name, profile in PRESET_PROFILES.items()
+        }
+    })
+
+
+@router.get("/presets/{preset_name}")
+async def get_preset(preset_name: str):
+    """Get a specific preset profile with full configuration."""
+    if preset_name not in PRESET_PROFILES:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Preset '{preset_name}' not found"}
+        )
+    
+    profile = PRESET_PROFILES[preset_name]
+    return JSONResponse(content={
+        "preset": preset_name,
+        **profile
+    })
+
+
+@router.get("/job/{job_id}/report")
+async def download_job_report(job_id: str):
+    """
+    Download a processing report for a job.
+    Returns JSON sidecar with passes, metrics, and warnings.
+    """
+    try:
+        # Get job stats
+        job_stats = analytics_store.get_job_stats(job_id)
+        job_info = jobs_snapshot.get(job_id, {})
+        
+        # Get pipeline stats
+        pipeline = get_pipeline()
+        chunk_failures = 0
+        chunk_total = 0
+        if pipeline:
+            if hasattr(pipeline, '_current_chunk_failures'):
+                chunk_failures = pipeline._current_chunk_failures.get(job_id, 0)
+            if hasattr(pipeline, '_current_chunk_total'):
+                chunk_total = pipeline._current_chunk_total.get(job_id, 0)
+        
+        report = {
+            "jobId": job_id,
+            "generatedAt": datetime.now().isoformat(),
+            "summary": {
+                "totalCost": job_stats.get("total_cost", 0.0),
+                "totalTokens": job_stats.get("total_tokens", 0),
+                "passCount": job_stats.get("pass_count", 0),
+                "status": job_info.get("type", "unknown")
+            },
+            "passes": [
+                {"passNumber": i + 1, "cost": cost}
+                for i, cost in enumerate(job_stats.get("pass_costs", []))
+            ],
+            "chunks": {
+                "total": chunk_total,
+                "failures": chunk_failures,
+                "fallbackUsed": chunk_failures > 0
+            },
+            "warnings": [],
+            "errors": []
+        }
+        
+        # Add warnings
+        if chunk_failures > 0:
+            report["warnings"].append(f"{chunk_failures}/{chunk_total} chunks used fallback text")
+        
+        if job_info.get("type") == "error":
+            report["errors"].append(job_info.get("error", "Unknown error"))
+        
+        from fastapi.responses import Response
+        return Response(
+            content=json.dumps(report, indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="job_{job_id}_report.json"'
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to generate job report: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to generate report: {str(e)}"}
+        )
