@@ -287,7 +287,7 @@ class OpenAIModel:
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
-    def generate(self, system: str, user: str, temperature: float = 0.4, max_tokens: int = 2000, job_id: str = None, user_id: str = None) -> tuple[str, dict]:
+    def generate(self, system: str, user: str, temperature: float = 0.4, max_tokens: int = 2000, job_id: str = None, user_id: str = None, fast_mode: bool = False) -> tuple[str, dict]:
         t0 = time.perf_counter()
         
         def _estimate_max_chars_for_model(model: str, max_input_tokens: int = 7000) -> int:
@@ -317,6 +317,11 @@ class OpenAIModel:
             if pre_tokens > max_in:
                 raise ValueError(f"TOKEN_BEDGET_EXCEEDED: {pre_tokens}>{max_in}")
 
+        # Use model override for fast mode (cheaper, faster model)
+        use_model = self.model
+        if fast_mode:
+            # Use gpt-4o-mini for faster/cheaper processing in fast mode
+            use_model = os.getenv("OPENAI_FAST_MODEL", "gpt-4o-mini")
         try:
             resp = self.client.chat.completions.create(
                 model=self.model,
