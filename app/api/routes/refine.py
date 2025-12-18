@@ -637,6 +637,44 @@ async def _refine_stream(request: RefinementRequest, job_id: str) -> AsyncGenera
 
     pipeline = get_pipeline()
     logger.debug(f"Pipeline initialized successfully")
+    
+    # Set up progress callback for real-time chunk progress updates
+    # This allows the pipeline to emit progress events during long-running chunk processing
+    # Using thread-safe broadcast mechanism since pipeline runs in a thread pool
+    
+    def pipeline_progress_callback(cb_job_id: str, stage: str, progress: float, message: str):
+        """Callback invoked by pipeline during chunk processing to report progress.
+        Called from a thread pool, so we use asyncio.run_coroutine_threadsafe for WebSocket broadcast.
+        """
+        try:
+            progress_evt = {
+                'type': 'chunk_progress',
+                'jobId': cb_job_id,
+                'stage': stage,
+                'progress': round(progress, 1),
+                'message': message
+            }
+            # Broadcast via WebSocket from thread - use thread-safe method
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Schedule the coroutine from the thread
+                    asyncio.run_coroutine_threadsafe(
+                        ws_manager.broadcast(cb_job_id, progress_evt),
+                        loop
+                    )
+            except Exception:
+                # If we can't get event loop, just log (progress will still show in logs)
+                pass
+            logger.debug(f"Progress callback: {message}")
+        except Exception as e:
+            logger.debug(f"Progress callback error: {e}")
+    
+    # Set the callback on the pipeline
+    if hasattr(pipeline, 'set_progress_callback'):
+        pipeline.set_progress_callback(pipeline_progress_callback)
+        logger.debug("Set pipeline progress callback")
+    
     memory = memory_manager.get_memory(request.user_id) if request.use_memory else None
     processed_files = 0  # Track successfully processed files
     logger.debug(f"Processing {len(request.files)} files")
