@@ -215,7 +215,7 @@ class RefinementPipeline:
             out.append(cur)
         return out if out else ["\n\n".join(sections)]
 
-    def _smart_chunk_text(self, text: str, target_chunk_size: int = 5000, overlap: int = 0) -> List[str]:
+    def _smart_chunk_text(self, text: str, target_chunk_size: int = 5000) -> List[str]:
         """
         Smart chunking that preserves paragraph and sentence boundaries.
         Much faster than domain-aware chunking for general documents.
@@ -223,7 +223,6 @@ class RefinementPipeline:
         Args:
             text: Text to chunk
             target_chunk_size: Target size in characters (not tokens, for speed)
-            overlap: Number of characters to overlap between chunks (for context preservation)
         
         Returns:
             List of text chunks
@@ -237,8 +236,6 @@ class RefinementPipeline:
         paragraphs = re.split(r'\n\s*\n', text)
         
         current_chunk = ""
-        overlap_buffer = ""  # Store text for overlap with next chunk
-        
         for para in paragraphs:
             para = para.strip()
             if not para:
@@ -251,80 +248,30 @@ class RefinementPipeline:
                 # Current chunk is full, save it
                 if current_chunk:
                     chunks.append(current_chunk)
-                    # Store overlap buffer from end of current chunk
-                    if overlap > 0:
-                        overlap_buffer = current_chunk[-overlap:] if len(current_chunk) > overlap else current_chunk
                 
                 # If this paragraph itself is too large, split by sentences
                 if len(para) > target_chunk_size:
                     sentences = re.split(r'(?<=[.!?])\s+', para)
-                    sentence_chunk = overlap_buffer + " " if overlap_buffer else ""
+                    sentence_chunk = ""
                     for sent in sentences:
                         if len(sentence_chunk) + len(sent) + 1 <= target_chunk_size:
                             sentence_chunk = sentence_chunk + " " + sent if sentence_chunk else sent
                         else:
                             if sentence_chunk:
-                                chunks.append(sentence_chunk.strip())
-                                # Store overlap buffer
-                                if overlap > 0:
-                                    overlap_buffer = sentence_chunk[-overlap:] if len(sentence_chunk) > overlap else sentence_chunk
-                            # Start new chunk with overlap
-                            sentence_chunk = (overlap_buffer + " " if overlap_buffer else "") + sent
+                                chunks.append(sentence_chunk)
+                            # If single sentence is still too long, just add it
+                            sentence_chunk = sent
                     if sentence_chunk:
-                        current_chunk = sentence_chunk.strip()
+                        current_chunk = sentence_chunk
                     else:
                         current_chunk = ""
                 else:
-                    # Start new chunk with overlap from previous
-                    current_chunk = (overlap_buffer + "\n\n" if overlap_buffer else "") + para
+                    current_chunk = para
         
         if current_chunk:
             chunks.append(current_chunk)
         
         return chunks if chunks else [text]
-
-    def _merge_overlapping_chunks(self, chunks: List[str], overlap: int = 200) -> str:
-        """
-        Merge chunks that were split with overlap, removing duplicate content at boundaries.
-        Uses fuzzy matching to find the best merge point.
-        
-        Args:
-            chunks: List of text chunks with potential overlap
-            overlap: Expected overlap size in characters
-        
-        Returns:
-            Merged text with duplicates removed
-        """
-        if not chunks:
-            return ""
-        if len(chunks) == 1:
-            return chunks[0]
-        
-        result = chunks[0]
-        
-        for i in range(1, len(chunks)):
-            current = chunks[i]
-            if not current:
-                continue
-            
-            # Try to find overlap between end of result and start of current chunk
-            best_overlap_len = 0
-            search_range = min(overlap * 2, len(result), len(current))
-            
-            for j in range(search_range, 10, -1):
-                # Check if end of result matches start of current
-                if result[-j:].lower() == current[:j].lower():
-                    best_overlap_len = j
-                    break
-            
-            if best_overlap_len > 0:
-                # Skip the overlapping part from current chunk
-                result = result + current[best_overlap_len:]
-            else:
-                # No overlap found, just concatenate with separator
-                result = result + "\n\n" + current
-        
-        return result
 
     def _should_auto_chunk(self, text: str) -> bool:
         """Determine if text should be automatically chunked based on size."""
@@ -2051,15 +1998,13 @@ class RefinementPipeline:
                         print(f"_three_phase_refine: Using domain-aware chunking: {len(chunks)} chunks")
                     else:
                         # Fall back to smart paragraph-based chunking
-                        # Target ~4000 chars per chunk with 200 char overlap for context preservation
-                        CHUNK_OVERLAP = 200
-                        chunks = self._smart_chunk_text(out, target_chunk_size=4000, overlap=CHUNK_OVERLAP)
-                        print(f"_three_phase_refine: Using smart paragraph chunking: {len(chunks)} chunks with {CHUNK_OVERLAP} char overlap")
+                        # Target ~4000 chars per chunk for optimal parallelization
+                        chunks = self._smart_chunk_text(out, target_chunk_size=4000)
+                        print(f"_three_phase_refine: Using smart paragraph chunking: {len(chunks)} chunks")
                 else:
-                    # Use smart paragraph-based chunking with overlap for context preservation
-                    CHUNK_OVERLAP = 200
-                    chunks = self._smart_chunk_text(out, target_chunk_size=4000, overlap=CHUNK_OVERLAP)
-                    print(f"_three_phase_refine: Using smart chunking: {len(chunks)} chunks with {CHUNK_OVERLAP} char overlap")
+                    # Use smart paragraph-based chunking
+                    chunks = self._smart_chunk_text(out, target_chunk_size=4000)
+                    print(f"_three_phase_refine: Using smart chunking: {len(chunks)} chunks")
             else:
                 chunks = [out]
                 print(f"_three_phase_refine: Document small enough, no chunking needed")
@@ -2074,101 +2019,61 @@ class RefinementPipeline:
                 cost_infos: List[dict] = []
                 total_chunks = len(chunks)
                 completed_count = [0]  # Use list for mutable counter across threads
-                failed_count = [0]  # Track failed chunks for circuit breaker
-                chunk_results: List[Tuple[int, str, dict, int, bool]] = []  # Store results with success flag
                 
                 # Initialize chunk progress for this job
                 effective_job_id = getattr(self, '_current_job_id', None) or 'default'
                 with self._job_lock:
                     self._current_chunk_progress[effective_job_id] = 0
                 
-                # Configuration for retry logic
-                MAX_RETRIES = 3
-                CIRCUIT_BREAKER_THRESHOLD = 0.5  # Abort if >50% chunks fail
-                
-                def process_chunk_with_retry(chunk_idx: int, chunk: str) -> Tuple[int, str, dict, int, bool]:
-                    """Process a chunk with retry logic and exponential backoff.
-                    Returns: (chunk_idx, generated_text, cost_info, pre_tokens, success_flag)
-                    """
-                    last_error = None
-                    
-                    for attempt in range(MAX_RETRIES):
+                def process_chunk(chunk_idx: int, chunk: str) -> Tuple[int, str, dict]:
+                    """Process a single chunk and return its index, generated text, and cost info."""
+                    try:
+                        payload = chunk
+                        ph_map = {}
+                        if self.enable_placeholders:
+                            payload, ph_map = self._apply_placeholders(payload)
+                        
+                        # Preflight token count for this chunk (system + payload)
+                        pre_tokens = 0
                         try:
-                            payload = chunk
-                            ph_map = {}
-                            if self.enable_placeholders:
-                                payload, ph_map = self._apply_placeholders(payload)
-                            
-                            # Preflight token count for this chunk (system + payload)
-                            pre_tokens = 0
+                            pre_tokens = self._count_tokens((sys_full or "") + "\n" + (payload or ""), model_name)
+                        except Exception:
+                            pass
+                        
+                        # OPTIMIZATION: Dynamic max_tokens based on input size
+                        # Adaptive: 50% of input tokens, but between 1000-4000
+                        try:
+                            input_tokens = pre_tokens if pre_tokens > 0 else self._count_tokens(payload, model_name)
+                            adaptive_max_tokens = min(4000, max(1000, int(input_tokens * 0.5)))
+                        except Exception:
+                            adaptive_max_tokens = 2000  # Fallback to default
+                        
+                        # Generate text
+                        gen_txt, cost_info = self.model.generate(
+                            system=sys_full, 
+                            user=payload, 
+                            temperature=temp, 
+                            max_tokens=adaptive_max_tokens, 
+                            job_id=self._current_job_id, 
+                            user_id=getattr(self, '_current_user_id', None)
+                        )
+                        
+                        # Restore placeholders if needed
+                        if self.enable_placeholders and ph_map:
                             try:
-                                pre_tokens = self._count_tokens((sys_full or "") + "\n" + (payload or ""), model_name)
+                                gen_txt = self._restore_placeholders(gen_txt if isinstance(gen_txt, str) else gen_txt[0], ph_map)
                             except Exception:
                                 pass
-                            
-                            # OPTIMIZATION: Dynamic max_tokens based on input size
-                            # Adaptive: 50% of input tokens, but between 1000-4000
-                            try:
-                                input_tokens = pre_tokens if pre_tokens > 0 else self._count_tokens(payload, model_name)
-                                adaptive_max_tokens = min(4000, max(1000, int(input_tokens * 0.5)))
-                            except Exception:
-                                adaptive_max_tokens = 2000  # Fallback to default
-                            
-                            # Generate text with model tiering (cheaper model for early passes)
-                            gen_txt, cost_info = self.model.generate(
-                                system=sys_full, 
-                                user=payload, 
-                                temperature=temp, 
-                                max_tokens=adaptive_max_tokens, 
-                                job_id=self._current_job_id, 
-                                user_id=getattr(self, '_current_user_id', None),
-                                pass_num=getattr(self, '_current_pass_index', 1),
-                                total_passes=getattr(self, '_current_total_passes', 1)
-                            )
-                            
-                            # Restore placeholders if needed
-                            if self.enable_placeholders and ph_map:
-                                try:
-                                    gen_txt = self._restore_placeholders(gen_txt if isinstance(gen_txt, str) else gen_txt[0], ph_map)
-                                except Exception:
-                                    pass
-                            
-                            # Normalize gen_txt
-                            if isinstance(gen_txt, tuple):
-                                gen_txt = gen_txt[0]
-                            
-                            # Validate output - if empty or too short, it might be a failure
-                            if gen_txt and len(gen_txt.strip()) > 10:
-                                return chunk_idx, str(gen_txt), cost_info, pre_tokens, True  # Success
-                            else:
-                                raise ValueError(f"Generated text too short or empty: {len(gen_txt) if gen_txt else 0} chars")
-                            
-                        except Exception as e:
-                            last_error = e
-                            if attempt < MAX_RETRIES - 1:
-                                # Exponential backoff: 1s, 2s, 4s
-                                sleep_time = 2 ** attempt
-                                print(f"_three_phase_refine: Chunk {chunk_idx} failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {sleep_time}s: {e}")
-                                time.sleep(sleep_time)
-                    
-                    # All retries failed - return original chunk as fallback (ensures no content loss)
-                    print(f"_three_phase_refine: Chunk {chunk_idx} failed after {MAX_RETRIES} attempts, using original text as fallback")
-                    return chunk_idx, chunk, {'total_cost': 0, 'tokens_in': 0, 'tokens_out': 0, 'error': str(last_error)}, 0, False
-                
+
                 # Process chunks in parallel using ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=self._max_parallel_workers) as executor:
-                    futures = {executor.submit(process_chunk_with_retry, idx, ch): idx for idx, ch in enumerate(chunks)}
+                    futures = {executor.submit(process_chunk, idx, ch): idx for idx, ch in enumerate(chunks)}
                     
                     for future in as_completed(futures):
                         try:
-                            chunk_idx, gen_txt, cost_info, pre_tokens, success = future.result()
+                            chunk_idx, gen_txt, cost_info, pre_tokens = future.result()
                             generated_parts[chunk_idx] = gen_txt
                             cost_infos.append(cost_info)
-                            chunk_results.append((chunk_idx, gen_txt, cost_info, pre_tokens, success))
-                            
-                            if not success:
-                                failed_count[0] += 1
-                            
                             try:
                                 pass_pre_tokens += int(pre_tokens)
                                 pass_used_in_tokens += int(cost_info.get('tokens_in', 0) or 0)
@@ -2180,40 +2085,16 @@ class RefinementPipeline:
                             with self._job_lock:
                                 self._current_chunk_progress[effective_job_id] = completed_count[0]
                             progress_pct = (completed_count[0] / total_chunks) * 100
-                            status_msg = "✓" if success else "⚠ (fallback)"
                             self._report_progress(
                                 effective_job_id, 
                                 f"refine_phase_{idx}", 
                                 progress_pct,
-                                f"Chunk {completed_count[0]}/{total_chunks} {status_msg} ({progress_pct:.0f}%)"
+                                f"Processing chunk {completed_count[0]}/{total_chunks} ({progress_pct:.0f}%)"
                             )
-                            print(f"_three_phase_refine: Completed chunk {completed_count[0]}/{total_chunks} {status_msg} ({progress_pct:.0f}%)")
+                            print(f"_three_phase_refine: Completed chunk {completed_count[0]}/{total_chunks} ({progress_pct:.0f}%)")
                         except Exception as e:
                             print(f"_three_phase_refine: Error getting result from chunk processing: {e}")
-                            failed_count[0] += 1
                             # Continue with other chunks
-                
-                # CIRCUIT BREAKER: Check failure rate after all chunks processed
-                failure_rate = failed_count[0] / total_chunks if total_chunks > 0 else 0
-                if failure_rate > CIRCUIT_BREAKER_THRESHOLD:
-                    error_msg = f"Circuit breaker triggered: {failed_count[0]}/{total_chunks} chunks failed ({failure_rate*100:.0f}%)"
-                    print(f"_three_phase_refine: {error_msg}")
-                    # Don't raise - instead, we've fallen back to original text for failed chunks
-                    # Log the warning but continue with degraded output
-                    self._report_progress(
-                        effective_job_id,
-                        f"refine_phase_{idx}",
-                        100,
-                        f"⚠ {error_msg} - using fallback text for failed chunks"
-                    )
-                elif failure_rate > 0.2:  # More than 20% failed - warn but continue
-                    print(f"_three_phase_refine: WARNING - {failed_count[0]}/{total_chunks} chunks failed, results may be degraded")
-                    self._report_progress(
-                        effective_job_id,
-                        f"refine_phase_{idx}",
-                        100,
-                        f"⚠ {failed_count[0]}/{total_chunks} chunks used fallback text"
-                    )
                 
                 # Track all costs
                 if not hasattr(self, '_pass_costs'):
@@ -2295,13 +2176,7 @@ class RefinementPipeline:
 
                     generated_parts.append(str(gen_txt))
 
-            # Merge chunks - use overlap-aware merge if we used overlapping chunks
-            if len(generated_parts) > 1 and should_chunk:
-                # Use intelligent merge that handles overlapping content
-                out = self._merge_overlapping_chunks([p for p in generated_parts if p], overlap=200)
-                print(f"_three_phase_refine: Merged {len(generated_parts)} chunks with overlap handling (output length: {len(out)} chars)")
-            else:
-                out = "\n\n".join([p for p in generated_parts if p])
+            out = "\n\n".join([p for p in generated_parts if p])
             print(f"_three_phase_refine: LLM call completed for phase {idx} (output length: {len(out)} chars)")
         # Quick nudge passes with rollback capability: microstructure → tone → anti-scanner
         # Store initial state for potential rollback
