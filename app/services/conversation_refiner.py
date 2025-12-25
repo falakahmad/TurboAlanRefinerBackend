@@ -1,3 +1,4 @@
+from typing import List, Dict
 from app.core.prompt_schema import ADVANCED_COMMANDS
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
